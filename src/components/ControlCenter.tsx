@@ -19,7 +19,6 @@ import { ProjectMemoryPanel } from "@/components/ProjectMemoryPanel";
 import { RulesPanel } from "@/components/RulesPanel";
 import { TaskCard } from "@/components/TaskCard";
 import {
-  approveActionInDb,
   archiveProjectInDb,
   attemptDeleteContentInDb,
   createAutomationRuleInDb,
@@ -46,7 +45,24 @@ import {
   upsertConnectorInDb,
 } from "@/lib/db/controlCenterRepository";
 import { generateHandoffForTask, getModelLabel, startTaskWithAi } from "@/lib/orchestrator/taskRunner";
-import type { ActionLog, AiModelId, AutomationStatus, ContentAiAction, ControlCenterData, MediaAssetStatus, MessageStatus, Project, ProjectMemory, TaskState } from "@/lib/types";
+import type {
+  ActionLog,
+  AiModelId,
+  Approval,
+  AutomationStatus,
+  ContentAiAction,
+  ContentItem,
+  ContentRoute,
+  ControlCenterData,
+  MediaAssetStatus,
+  Message,
+  MessageStatus,
+  Project,
+  ProjectMemory,
+  PublishLog,
+  Task,
+  TaskState,
+} from "@/lib/types";
 
 type PendingProjectAction = {
   kind: "archive" | "restore" | "delete";
@@ -61,6 +77,25 @@ type DashboardNotification = {
   tone: "sky" | "amber" | "emerald" | "violet";
   href: string;
   onSelect?: () => void;
+};
+
+type ApprovalToast = {
+  id: string;
+  title: string;
+  detail: string;
+  tone: "success" | "warning" | "error";
+};
+
+type ApproveApiResult = {
+  task: Task;
+  state: TaskState;
+  approval: Approval;
+  message?: Message;
+  item?: ContentItem;
+  routes?: ContentRoute[];
+  publishLogs?: PublishLog[];
+  log: ActionLog;
+  error?: string;
 };
 
 const viewConfig: Record<AppView, { title: string; subtitle: string }> = {
@@ -79,13 +114,6 @@ const viewConfig: Record<AppView, { title: string; subtitle: string }> = {
   automation: { title: "Automation", subtitle: "Mock workflows and routing" },
   settings: { title: "Settings", subtitle: "Application configuration" },
 };
-
-const REPLY_APPROVAL_PREFIX = "reply_comment:";
-const PUBLISH_APPROVAL_PREFIX = "publish_content:";
-
-function approvalTargetId(requestedAction: string, prefix: string) {
-  return requestedAction.startsWith(prefix) ? requestedAction.slice(prefix.length) : "";
-}
 
 function newId(prefix: string) {
   const value = typeof globalThis.crypto?.randomUUID === "function"
@@ -135,6 +163,42 @@ function notificationToneClass(tone: DashboardNotification["tone"]) {
   return "bg-sky-300";
 }
 
+function approvalToastClass(tone: ApprovalToast["tone"]) {
+  if (tone === "success") {
+    return "border-emerald-300/40 bg-emerald-300/10 text-emerald-50";
+  }
+
+  if (tone === "error") {
+    return "border-rose-300/40 bg-rose-300/10 text-rose-50";
+  }
+
+  return "border-amber-300/40 bg-amber-300/10 text-amber-50";
+}
+
+function approvalToastCopy(status: string, executionError?: string): Omit<ApprovalToast, "id"> {
+  if (status === "executed") {
+    return {
+      title: "Approved — executed successfully",
+      detail: "Connector action completed and the approval data was refreshed from Supabase.",
+      tone: "success",
+    };
+  }
+
+  if (status === "failed") {
+    return {
+      title: "Approval failed",
+      detail: executionError ?? "The connector action failed. Check the approval card for details.",
+      tone: "error",
+    };
+  }
+
+  return {
+    title: "Approved — execution pending",
+    detail: "Approved, but actual connector reply/send is not implemented yet.",
+    tone: "warning",
+  };
+}
+
 function getErrorMessage(error: unknown) {
   if (error instanceof Error && error.message.includes("row-level security")) {
     return "Supabase RLS is blocking writes. Run database/schema.sql in the Supabase SQL editor, then press Reload.";
@@ -167,8 +231,13 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
   const [isReady, setIsReady] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [approvalToast, setApprovalToast] = useState<ApprovalToast | null>(null);
   const [pendingProjectAction, setPendingProjectAction] = useState<PendingProjectAction | null>(null);
   const [clockIso, setClockIso] = useState("2026-06-28T00:00:00.000Z");
+
+  const showApprovalToast = useCallback((toast: Omit<ApprovalToast, "id">) => {
+    setApprovalToast({ id: newId("approval-toast"), ...toast });
+  }, []);
 
   const refreshDashboard = useCallback(async () => {
     setIsReady(false);
@@ -218,6 +287,18 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     return () => window.clearTimeout(timeoutId);
   }, []);
 
+  useEffect(() => {
+    if (!approvalToast) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setApprovalToast(null);
+    }, 6500);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [approvalToast]);
+
   const selectedTask = useMemo(
     () => data.tasks.find((task) => task.id === selectedTaskId) ?? data.tasks[0],
     [data.tasks, selectedTaskId],
@@ -236,7 +317,17 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
   const selectedLogs = selectedTask
     ? data.action_logs.filter((log) => log.task_id === selectedTask.id).slice(0, 8)
     : data.action_logs.slice(0, 8);
-  const pendingApprovals = useMemo(() => data.approvals.filter((approval) => approval.status === "pending"), [data.approvals]);
+  const pendingApprovals = useMemo(
+    () =>
+      data.approvals.filter(
+        (approval) =>
+          approval.status === "pending" ||
+          approval.execution_status === "executing" ||
+          approval.execution_status === "execution_pending" ||
+          approval.execution_status === "failed",
+      ),
+    [data.approvals],
+  );
   const selectedProjectMessages = selectedProject ? data.messages.filter((message) => message.project_id === selectedProject.id) : [];
   const selectedProjectContentItems = selectedProject ? data.content_items.filter((item) => item.project_id === selectedProject.id) : [];
   const selectedProjectContentIds = new Set(selectedProjectContentItems.map((item) => item.id));
@@ -1118,57 +1209,26 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     }
 
     const task = data.tasks.find((item) => item.id === approval.task_id);
-    const state = data.task_states[approval.task_id];
-    const now = new Date().toISOString();
-    const replyMessageId = approvalTargetId(approval.requested_action, REPLY_APPROVAL_PREFIX);
-    const publishContentId = approvalTargetId(approval.requested_action, PUBLISH_APPROVAL_PREFIX);
-    const message = replyMessageId ? data.messages.find((item) => item.id === replyMessageId) : undefined;
-    const contentItem = publishContentId ? data.content_items.find((item) => item.id === publishContentId) : undefined;
-    const contentRoutes = publishContentId ? data.content_routes.filter((route) => route.content_item_id === publishContentId) : undefined;
 
-    if (!task || !state) {
+    if (!task) {
       return;
     }
-
-    const isReplyApproval = Boolean(message);
-    const isPublishApproval = Boolean(contentItem);
-    const approvedState: TaskState = {
-      ...state,
-      current_stage: isReplyApproval
-        ? "reply draft approved"
-        : isPublishApproval
-          ? "content publish approved"
-          : "approved for manual publish",
-      completed_steps: Array.from(
-        new Set([
-          ...state.completed_steps,
-          isReplyApproval ? "reply approval granted" : isPublishApproval ? "publish approval granted" : "approval granted",
-        ]),
-      ),
-      next_step: isReplyApproval
-        ? "send or publish the approved reply from the connected channel"
-        : isPublishApproval
-          ? "external publish connector can execute later, or publish manually now"
-          : "connect Instagram later or publish manually now",
-      status: "completed",
-      needs_review: false,
-      updated_at: now,
-    };
-    const approvedApproval = { ...approval, status: "approved" as const, resolved_at: now };
 
     setIsSaving(true);
     setLoadError("");
 
     try {
-      const result = await approveActionInDb({
-        task,
-        state,
-        approval: approvedApproval,
-        updatedState: approvedState,
-        message,
-        contentItem,
-        routes: contentRoutes,
+      const response = await fetch("/api/approvals/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approvalId }),
       });
+      const result = (await response.json()) as ApproveApiResult;
+
+      if (!response.ok) {
+        throw new Error(result.error ?? "Approval execution failed.");
+      }
+
       const routeMap = new Map((result.routes ?? []).map((route) => [route.id, route]));
 
       setData((current) => ({
@@ -1198,8 +1258,33 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         publish_logs: result.publishLogs ? [...result.publishLogs, ...current.publish_logs] : current.publish_logs,
         action_logs: [result.log, ...current.action_logs],
       }));
+
+      try {
+        const refreshed = await loadControlCenterData();
+
+        setData(refreshed);
+
+        if (refreshed.tasks.some((item) => item.id === task.id)) {
+          setSelectedTaskId(task.id);
+        }
+
+        if (refreshed.projects.some((item) => item.id === task.project_id)) {
+          setSelectedProjectId(task.project_id);
+        }
+      } catch (refreshError) {
+        setLoadError(`Approved, but refresh failed: ${getErrorMessage(refreshError)}`);
+      }
+
+      showApprovalToast(approvalToastCopy(result.approval.execution_status, result.approval.execution_error));
     } catch (error) {
-      setLoadError(getErrorMessage(error));
+      const message = getErrorMessage(error);
+
+      setLoadError(message);
+      showApprovalToast({
+        title: "Approval failed",
+        detail: message,
+        tone: "error",
+      });
     } finally {
       setIsSaving(false);
     }
@@ -1597,6 +1682,38 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
   );
   const desktopToolbar = renderAppToolbar("desktop");
   const mobileToolbar = renderAppToolbar("mobile");
+  const approvalToastAlert = approvalToast ? (
+    <div
+      aria-live={approvalToast.tone === "error" ? "assertive" : "polite"}
+      className={`fixed bottom-4 right-4 z-[70] w-[min(24rem,calc(100vw-2rem))] rounded-lg border p-4 shadow-2xl shadow-black/30 backdrop-blur ${approvalToastClass(approvalToast.tone)}`}
+      role={approvalToast.tone === "error" ? "alert" : "status"}
+    >
+      <div className="flex items-start gap-3">
+        <span
+          className={`mt-2 h-2.5 w-2.5 shrink-0 rounded-full ${
+            approvalToast.tone === "success"
+              ? "bg-emerald-300"
+              : approvalToast.tone === "error"
+                ? "bg-rose-300"
+                : "bg-amber-300"
+          }`}
+          aria-hidden="true"
+        />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold">{approvalToast.title}</p>
+          <p className="mt-1 break-words text-sm opacity-90">{approvalToast.detail}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setApprovalToast(null)}
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 text-current transition hover:bg-white/10"
+          aria-label="Dismiss approval status"
+        >
+          <X className="h-4 w-4" aria-hidden="true" />
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   function renderShell(content: ReactNode) {
     return (
@@ -1612,6 +1729,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         mobileToolbar={mobileToolbar}
         onReload={() => void refreshDashboard()}
       >
+        {approvalToastAlert}
         {projectActionDialog}
         {databaseAlert}
         {loadingAlert}
@@ -1997,6 +2115,8 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
           </div>
         </div>
       </header>
+
+      {approvalToastAlert}
 
       {pendingProjectAction && pendingProject ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/75 px-4">

@@ -23,6 +23,14 @@ export type AutomationStatus = "active" | "paused";
 export type AutomationTrigger = "daily_report" | "new_message" | "content_scheduled" | "handoff_completed" | "approval_pending";
 export type AutomationAction = "create_task" | "draft_reply" | "generate_report" | "notify_user" | "draft_content";
 
+export interface ConnectorExecutionResult {
+  execution_status: ApprovalExecutionStatus;
+  execution_error?: string;
+  details: string;
+  log_action: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface Project {
   id: string;
   name: string;

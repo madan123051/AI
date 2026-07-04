@@ -11,6 +11,7 @@ import type {
   AutomationStatus,
   AutomationTrigger,
   Connector,
+  ConnectorExecutionResult,
   ConnectorStatus,
   ConnectorType,
   ContentAiAction,
@@ -3300,12 +3301,7 @@ export async function persistTaskTransition(input: {
   };
 }
 
-function connectorExecutionPlaceholder(approval: Approval): {
-  execution_status: ApprovalExecutionStatus;
-  execution_error?: string;
-  details: string;
-  log_action: string;
-} {
+function connectorExecutionPlaceholder(approval: Approval): ConnectorExecutionResult {
   if (approval.requested_action.includes("delete")) {
     return {
       execution_status: "failed",
@@ -3376,11 +3372,12 @@ export async function approveActionInDb(input: {
   message?: Message;
   contentItem?: ContentItem;
   routes?: ContentRoute[];
+  executionResult?: ConnectorExecutionResult;
 }) {
   assertSupabaseReady();
   const supabase = getSupabaseClient();
   const resolvedAt = input.approval.resolved_at ?? new Date().toISOString();
-  const executionResult = connectorExecutionPlaceholder(input.approval);
+  const executionResult = input.executionResult ?? connectorExecutionPlaceholder(input.approval);
   const finalTaskStatus: Task["status"] =
     executionResult.execution_status === "executed"
       ? "completed"
@@ -3419,6 +3416,7 @@ export async function approveActionInDb(input: {
       status: executionResult.execution_status,
       details: executionResult.details,
       evaluated_at: resolvedAt,
+      ...(executionResult.metadata ? { metadata: executionResult.metadata } : {}),
     },
   };
   const approvalResult = await supabase

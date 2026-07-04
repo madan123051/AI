@@ -96,6 +96,12 @@ export function ApprovalQueue({ approvals, onApprove }: ApprovalQueueProps) {
                         <p className="mt-1 whitespace-pre-line break-words text-sm text-amber-50">{approval.draft_text}</p>
                       </div>
                     ) : null}
+                    {approval.execution_status === "execution_pending" ? (
+                      <div className="flex gap-2 rounded-lg border border-amber-300/40 bg-amber-300/10 p-3 text-amber-100">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                        <p>Approved, but actual connector reply/send is not implemented yet.</p>
+                      </div>
+                    ) : null}
                     {approval.execution_error ? (
                       <div className="flex gap-2 rounded-lg border border-rose-300/30 bg-rose-300/10 p-3 text-rose-100">
                         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
