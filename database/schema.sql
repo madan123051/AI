@@ -219,6 +219,14 @@ values
   ('Delete Post', 'delete_resource', 'block', true)
 on conflict do nothing;
 
+insert into public.rules (name, action, effect, enabled)
+select 'Update Live Content', 'update_live_content', 'review', true
+where not exists (select 1 from public.rules where action = 'update_live_content');
+
+insert into public.rules (name, action, effect, enabled)
+select 'Reply Comment', 'reply_comment', 'review', true
+where not exists (select 1 from public.rules where action = 'reply_comment');
+
 create table if not exists public.project_memory (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null unique references public.projects(id) on delete cascade,
@@ -248,6 +256,49 @@ alter table public.connectors add constraint connectors_type_check check (type i
 
 alter table public.connectors drop constraint if exists connectors_status_check;
 alter table public.connectors add constraint connectors_status_check check (status in ('not_connected', 'connected', 'paused'));
+
+create table if not exists public.website_control_map (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  collection_name text not null,
+  display_name text not null default '',
+  create_action text not null default '',
+  update_action text not null default '',
+  delete_action text not null default '',
+  publish_behavior text not null default '',
+  source_file text not null default '',
+  source_function text not null default '',
+  status text not null default 'review_required',
+  action_statuses jsonb not null default '{}'::jsonb,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.website_control_map add column if not exists project_id uuid references public.projects(id) on delete cascade;
+alter table public.website_control_map add column if not exists collection_name text not null default '';
+alter table public.website_control_map add column if not exists display_name text not null default '';
+alter table public.website_control_map add column if not exists create_action text not null default '';
+alter table public.website_control_map add column if not exists update_action text not null default '';
+alter table public.website_control_map add column if not exists delete_action text not null default '';
+alter table public.website_control_map add column if not exists publish_behavior text not null default '';
+alter table public.website_control_map add column if not exists source_file text not null default '';
+alter table public.website_control_map add column if not exists source_function text not null default '';
+alter table public.website_control_map add column if not exists status text not null default 'review_required';
+alter table public.website_control_map add column if not exists action_statuses jsonb not null default '{}'::jsonb;
+alter table public.website_control_map add column if not exists metadata jsonb not null default '{}'::jsonb;
+alter table public.website_control_map add column if not exists created_at timestamptz not null default now();
+alter table public.website_control_map add column if not exists updated_at timestamptz not null default now();
+alter table public.website_control_map drop column if exists owner_id;
+alter table public.website_control_map drop constraint if exists website_control_map_status_check;
+alter table public.website_control_map add constraint website_control_map_status_check check (status in ('available', 'review_required', 'blocked'));
+
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'website_control_map_project_collection_key') then
+    alter table public.website_control_map add constraint website_control_map_project_collection_key unique (project_id, collection_name);
+  end if;
+end $$;
 
 create table if not exists public.automation_rules (
   id uuid primary key default gen_random_uuid(),
@@ -409,7 +460,7 @@ create table if not exists public.media_assets (
   storage_path text not null default '',
   alt_text text not null default '',
   tags text[] not null default '{}',
-  status text not null default 'available',
+  status text not null default 'draft',
   metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -423,7 +474,7 @@ alter table public.media_assets add column if not exists source_url text not nul
 alter table public.media_assets add column if not exists storage_path text not null default '';
 alter table public.media_assets add column if not exists alt_text text not null default '';
 alter table public.media_assets add column if not exists tags text[] not null default '{}';
-alter table public.media_assets add column if not exists status text not null default 'available';
+alter table public.media_assets add column if not exists status text not null default 'draft';
 alter table public.media_assets add column if not exists metadata jsonb not null default '{}'::jsonb;
 alter table public.media_assets add column if not exists created_at timestamptz not null default now();
 alter table public.media_assets add column if not exists updated_at timestamptz not null default now();
@@ -431,7 +482,7 @@ alter table public.media_assets drop column if exists owner_id;
 alter table public.media_assets drop constraint if exists media_assets_type_check;
 alter table public.media_assets drop constraint if exists media_assets_status_check;
 alter table public.media_assets add constraint media_assets_type_check check (asset_type in ('image', 'video', 'document', 'audio', 'other'));
-alter table public.media_assets add constraint media_assets_status_check check (status in ('available', 'attached', 'archived'));
+alter table public.media_assets add constraint media_assets_status_check check (status in ('draft', 'published', 'archived', 'available', 'attached'));
 
 create table if not exists public.messages (
   id uuid primary key default gen_random_uuid(),
@@ -519,6 +570,8 @@ create index if not exists ai_runs_task_id_created_at_idx on public.ai_runs(task
 create index if not exists project_memory_project_id_idx on public.project_memory(project_id);
 create index if not exists connectors_project_id_idx on public.connectors(project_id);
 create index if not exists connectors_project_type_idx on public.connectors(project_id, type);
+create index if not exists website_control_map_project_id_idx on public.website_control_map(project_id);
+create index if not exists website_control_map_collection_name_idx on public.website_control_map(collection_name);
 create index if not exists automation_rules_project_id_idx on public.automation_rules(project_id);
 create index if not exists automation_rules_status_idx on public.automation_rules(status);
 create index if not exists content_posts_project_id_idx on public.content_posts(project_id);
@@ -553,6 +606,7 @@ alter table public.approvals enable row level security;
 alter table public.rules enable row level security;
 alter table public.project_memory enable row level security;
 alter table public.connectors enable row level security;
+alter table public.website_control_map enable row level security;
 alter table public.automation_rules enable row level security;
 alter table public.content_posts enable row level security;
 alter table public.content_items enable row level security;
@@ -598,6 +652,10 @@ drop policy if exists "allow anon read connectors" on public.connectors;
 drop policy if exists "allow anon insert connectors" on public.connectors;
 drop policy if exists "allow anon update connectors" on public.connectors;
 drop policy if exists "allow anon delete connectors" on public.connectors;
+drop policy if exists "allow anon read website_control_map" on public.website_control_map;
+drop policy if exists "allow anon insert website_control_map" on public.website_control_map;
+drop policy if exists "allow anon update website_control_map" on public.website_control_map;
+drop policy if exists "allow anon delete website_control_map" on public.website_control_map;
 drop policy if exists "allow anon read automation_rules" on public.automation_rules;
 drop policy if exists "allow anon insert automation_rules" on public.automation_rules;
 drop policy if exists "allow anon update automation_rules" on public.automation_rules;
@@ -667,6 +725,10 @@ create policy "allow anon read connectors" on public.connectors for select to an
 create policy "allow anon insert connectors" on public.connectors for insert to anon, authenticated with check (true);
 create policy "allow anon update connectors" on public.connectors for update to anon, authenticated using (true) with check (true);
 create policy "allow anon delete connectors" on public.connectors for delete to anon, authenticated using (true);
+create policy "allow anon read website_control_map" on public.website_control_map for select to anon, authenticated using (true);
+create policy "allow anon insert website_control_map" on public.website_control_map for insert to anon, authenticated with check (true);
+create policy "allow anon update website_control_map" on public.website_control_map for update to anon, authenticated using (true) with check (true);
+create policy "allow anon delete website_control_map" on public.website_control_map for delete to anon, authenticated using (true);
 create policy "allow anon read automation_rules" on public.automation_rules for select to anon, authenticated using (true);
 create policy "allow anon insert automation_rules" on public.automation_rules for insert to anon, authenticated with check (true);
 create policy "allow anon update automation_rules" on public.automation_rules for update to anon, authenticated using (true) with check (true);

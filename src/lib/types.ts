@@ -11,9 +11,12 @@ export type ContentPlatform = "website" | "instagram" | "facebook";
 export type ContentStatus = "draft" | "scheduled" | "approval_required" | "published" | "failed";
 export type ContentAiAction = "generate_caption" | "generate_hashtags" | "generate_website_title" | "generate_story_text";
 export type MediaAssetType = "image" | "video" | "document" | "audio" | "other";
-export type MediaAssetStatus = "available" | "attached" | "archived";
+export type MediaAssetStatus = "draft" | "published" | "archived";
+export type MediaLinkTarget = "photo" | "story" | "video" | "content";
 export type ConnectorType = "gmail" | "instagram" | "facebook" | "website" | "viber" | "storage";
 export type ConnectorStatus = "not_connected" | "connected" | "paused";
+export type WebsiteControlStatus = "available" | "review_required" | "blocked";
+export type WebsiteControlAction = "create" | "update" | "delete" | "publish" | "reply";
 export type AutomationStatus = "active" | "paused";
 export type AutomationTrigger = "daily_report" | "new_message" | "content_scheduled" | "handoff_completed" | "approval_pending";
 export type AutomationAction = "create_task" | "draft_reply" | "generate_report" | "notify_user" | "draft_content";
@@ -174,6 +177,24 @@ export interface Connector {
   updated_at?: string;
 }
 
+export interface WebsiteControlMapEntry {
+  id: string;
+  project_id: string;
+  collection_name: string;
+  display_name: string;
+  create_action: string;
+  update_action: string;
+  delete_action: string;
+  publish_behavior: string;
+  source_file: string;
+  source_function: string;
+  status: WebsiteControlStatus;
+  action_statuses: Partial<Record<WebsiteControlAction, WebsiteControlStatus>>;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ContentPost {
   id: string;
   project_id: string;
@@ -236,6 +257,9 @@ export interface MediaAsset {
   id: string;
   project_id: string;
   content_item_id?: string;
+  linked_collection?: MediaLinkTarget;
+  linked_item_id?: string;
+  linked_item_label?: string;
   title: string;
   asset_type: MediaAssetType;
   source_url: string;
@@ -290,6 +314,7 @@ export interface ControlCenterData {
   action_logs: ActionLog[];
   approvals: Approval[];
   connectors: Connector[];
+  website_control_map: WebsiteControlMapEntry[];
   messages: Message[];
   content_items: ContentItem[];
   content_routes: ContentRoute[];

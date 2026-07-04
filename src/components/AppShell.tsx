@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   BarChart3,
   Bell,
@@ -55,6 +55,7 @@ type AppShellProps = {
   title: string;
   subtitle: string;
   notificationCount?: number;
+  notificationsHref?: string;
   toolbar?: ReactNode;
   mobileToolbar?: ReactNode;
   onReload: () => void;
@@ -89,6 +90,28 @@ function statusLabel(isReady: boolean, isSaving: boolean, hasError: boolean) {
   return isReady ? "Supabase connected" : "Loading database";
 }
 
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  const tagName = target.tagName.toLowerCase();
+
+  return target.isContentEditable || tagName === "input" || tagName === "textarea" || tagName === "select";
+}
+
+function focusGlobalSearch() {
+  const candidates = ["global-search-desktop", "global-search-mobile", "global-search"]
+    .map((id) => document.getElementById(id))
+    .filter((element): element is HTMLInputElement => element instanceof HTMLInputElement && !element.disabled);
+  const input = candidates.find((element) => element.getClientRects().length > 0) ?? candidates[0];
+
+  if (input instanceof HTMLInputElement) {
+    input.focus();
+    input.select();
+  }
+}
+
 export function AppShell({
   children,
   isReady,
@@ -97,6 +120,7 @@ export function AppShell({
   title,
   subtitle,
   notificationCount = 0,
+  notificationsHref = "/dashboard#notifications",
   toolbar,
   mobileToolbar,
   onReload,
@@ -105,6 +129,41 @@ export function AppShell({
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
   const [isQuickOpen, setIsQuickOpen] = useState(false);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsQuickOpen(false);
+        setIsMobileOpen(false);
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        focusGlobalSearch();
+        return;
+      }
+
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      if (event.key === "/") {
+        event.preventDefault();
+        focusGlobalSearch();
+        return;
+      }
+
+      if (!event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setIsQuickOpen((current) => !current);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   const notificationBadge = notificationCount > 0 ? (
     <span className="absolute -right-1 -top-1 inline-flex min-h-5 min-w-5 items-center justify-center rounded-full bg-emerald-300 px-1 text-[11px] font-semibold leading-none text-zinc-950">
@@ -141,6 +200,7 @@ export function AppShell({
               href={item.href}
               onClick={() => setIsMobileOpen(false)}
               title={item.label}
+              aria-current={active ? "page" : undefined}
               className={`group relative flex min-h-10 items-center gap-3 rounded-lg px-3 text-sm font-medium transition ${
                 active
                   ? "bg-zinc-800 text-zinc-50"
@@ -164,6 +224,7 @@ export function AppShell({
         <button
           type="button"
           onClick={() => setIsCollapsed((current) => !current)}
+          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
           className="flex min-h-10 w-full items-center justify-center gap-2 rounded-lg border border-zinc-800 px-3 text-sm font-medium text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-100"
           title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
@@ -176,6 +237,12 @@ export function AppShell({
 
   return (
     <div className="min-h-screen bg-background text-zinc-100">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60] focus:rounded-lg focus:bg-emerald-300 focus:px-3 focus:py-2 focus:text-sm focus:font-semibold focus:text-zinc-950"
+      >
+        Skip to main content
+      </a>
       <div className="hidden lg:fixed lg:inset-y-0 lg:left-0 lg:z-30 lg:block">{sidebar}</div>
 
       {isMobileOpen ? (
@@ -190,7 +257,8 @@ export function AppShell({
             <div className="absolute right-3 top-3 z-10">
               <button
                 type="button"
-                onClick={() => setIsMobileOpen(false)}
+              onClick={() => setIsMobileOpen(false)}
+                aria-label="Close navigation"
                 className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-950 text-zinc-200"
                 title="Close navigation"
               >
@@ -208,6 +276,7 @@ export function AppShell({
             <button
               type="button"
               onClick={() => setIsMobileOpen(true)}
+              aria-label="Open navigation"
               className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-zinc-800 text-zinc-200 lg:hidden"
               title="Open navigation"
             >
@@ -219,8 +288,8 @@ export function AppShell({
             </div>
             {toolbar ? <div className="hidden min-w-0 flex-1 items-center gap-3 lg:flex">{toolbar}</div> : null}
             <div className="hidden items-center gap-3 sm:flex">
-              <a
-                href="#notifications"
+              <Link
+                href={notificationsHref}
                 className="relative inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-zinc-800 px-3 text-sm font-medium text-zinc-100 transition hover:border-emerald-300 hover:text-emerald-200"
                 aria-label="Notifications"
                 title="Notifications"
@@ -228,14 +297,15 @@ export function AppShell({
                 <Bell className="h-4 w-4" aria-hidden="true" />
                 Notifications
                 {notificationBadge}
-              </a>
-              <div className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-zinc-800 px-3 text-sm text-zinc-400">
+              </Link>
+              <div className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-zinc-800 px-3 text-sm text-zinc-400" role="status" aria-live="polite">
                 <Save className="h-4 w-4 text-emerald-300" aria-hidden="true" />
                 <span>{statusLabel(isReady, isSaving, hasError)}</span>
               </div>
               <button
                 type="button"
                 onClick={onReload}
+                aria-label="Reload from Supabase"
                 className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-zinc-700 px-3 text-sm font-medium text-zinc-100 transition hover:border-emerald-300 hover:text-emerald-200"
                 title="Reload from Supabase"
               >
@@ -244,24 +314,25 @@ export function AppShell({
               </button>
             </div>
           </div>
-          {toolbar || mobileToolbar ? <div className="flex gap-2 border-t border-zinc-900 px-4 py-2 lg:hidden">{mobileToolbar ?? toolbar}</div> : null}
-          <div className="flex gap-2 border-t border-zinc-900 px-4 py-2 sm:hidden">
-            <a
-              href="#notifications"
+          {toolbar || mobileToolbar ? <div className="flex gap-2 overflow-x-auto border-t border-zinc-900 px-4 py-2 lg:hidden">{mobileToolbar ?? toolbar}</div> : null}
+          <div className="flex gap-2 overflow-x-auto border-t border-zinc-900 px-4 py-2 sm:hidden">
+            <Link
+              href={notificationsHref}
               className="relative inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-800 px-3 text-zinc-100"
               aria-label="Notifications"
               title="Notifications"
             >
               <Bell className="h-4 w-4" aria-hidden="true" />
               {notificationBadge}
-            </a>
-            <div className="inline-flex min-h-9 flex-1 items-center gap-2 rounded-lg border border-zinc-800 px-3 text-xs text-zinc-400">
+            </Link>
+            <div className="inline-flex min-h-9 flex-1 items-center gap-2 rounded-lg border border-zinc-800 px-3 text-xs text-zinc-400" role="status" aria-live="polite">
               <Save className="h-4 w-4 text-emerald-300" aria-hidden="true" />
               <span>{statusLabel(isReady, isSaving, hasError)}</span>
             </div>
             <button
               type="button"
               onClick={onReload}
+              aria-label="Reload from Supabase"
               className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-zinc-700 px-3 text-xs font-medium text-zinc-100"
               title="Reload from Supabase"
             >
@@ -271,17 +342,23 @@ export function AppShell({
           </div>
         </header>
 
-        <main className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
+        <main id="main-content" className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
           {children}
         </main>
       </div>
 
       <div className="fixed bottom-5 right-5 z-40 flex flex-col items-end gap-3">
         {isQuickOpen ? (
-          <div className="w-56 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/40">
+          <div
+            id="quick-actions-menu"
+            role="menu"
+            aria-label="Quick actions"
+            className="w-56 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/40"
+          >
             <Link
               href="/tasks"
               onClick={() => setIsQuickOpen(false)}
+              role="menuitem"
               className="flex min-h-11 items-center gap-3 border-b border-zinc-900 px-3 text-sm font-medium text-zinc-100 transition hover:bg-zinc-900"
             >
               <CheckSquare className="h-4 w-4 text-sky-300" aria-hidden="true" />
@@ -290,6 +367,7 @@ export function AppShell({
             <Link
               href="/content"
               onClick={() => setIsQuickOpen(false)}
+              role="menuitem"
               className="flex min-h-11 items-center gap-3 border-b border-zinc-900 px-3 text-sm font-medium text-zinc-100 transition hover:bg-zinc-900"
             >
               <CalendarDays className="h-4 w-4 text-emerald-300" aria-hidden="true" />
@@ -298,6 +376,7 @@ export function AppShell({
             <Link
               href="/projects"
               onClick={() => setIsQuickOpen(false)}
+              role="menuitem"
               className="flex min-h-11 items-center gap-3 border-b border-zinc-900 px-3 text-sm font-medium text-zinc-100 transition hover:bg-zinc-900"
             >
               <FolderKanban className="h-4 w-4 text-amber-300" aria-hidden="true" />
@@ -306,6 +385,7 @@ export function AppShell({
             <Link
               href="/ai-brain"
               onClick={() => setIsQuickOpen(false)}
+              role="menuitem"
               className="flex min-h-11 items-center gap-3 px-3 text-sm font-medium text-zinc-100 transition hover:bg-zinc-900"
             >
               <FileText className="h-4 w-4 text-violet-300" aria-hidden="true" />
@@ -314,6 +394,7 @@ export function AppShell({
             <Link
               href="/media"
               onClick={() => setIsQuickOpen(false)}
+              role="menuitem"
               className="flex min-h-11 items-center gap-3 border-t border-zinc-900 px-3 text-sm font-medium text-zinc-100 transition hover:bg-zinc-900"
             >
               <ImageIcon className="h-4 w-4 text-emerald-300" aria-hidden="true" />
@@ -325,6 +406,7 @@ export function AppShell({
           type="button"
           onClick={() => setIsQuickOpen((current) => !current)}
           aria-expanded={isQuickOpen}
+          aria-controls="quick-actions-menu"
           aria-label="Quick actions"
           className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-emerald-400 text-zinc-950 shadow-2xl shadow-emerald-950/40 transition hover:bg-emerald-300"
           title="Quick actions"

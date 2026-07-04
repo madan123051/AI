@@ -3,15 +3,36 @@ import type { Approval, Rule } from "@/lib/types";
 export const defaultRules: Rule[] = [
   {
     id: "rule-draft-allowed",
-    name: "Drafts are allowed",
+    name: "Create Draft",
     action: "draft_content",
     effect: "allow",
     enabled: true,
   },
   {
     id: "rule-publish-review",
-    name: "Review before publish",
+    name: "Publish Content",
     action: "publish_content",
+    effect: "review",
+    enabled: true,
+  },
+  {
+    id: "rule-update-live-review",
+    name: "Update Live Content",
+    action: "update_live_content",
+    effect: "review",
+    enabled: true,
+  },
+  {
+    id: "rule-delete-blocked",
+    name: "Delete Resource",
+    action: "delete_resource",
+    effect: "block",
+    enabled: true,
+  },
+  {
+    id: "rule-comment-reply-review",
+    name: "Reply Comment",
+    action: "reply_comment",
     effect: "review",
     enabled: true,
   },
@@ -20,13 +41,6 @@ export const defaultRules: Rule[] = [
     name: "Review before send",
     action: "send_email",
     effect: "review",
-    enabled: true,
-  },
-  {
-    id: "rule-delete-blocked",
-    name: "Delete actions blocked",
-    action: "delete_resource",
-    effect: "block",
     enabled: true,
   },
 ];

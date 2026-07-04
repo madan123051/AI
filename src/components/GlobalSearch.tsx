@@ -17,17 +17,46 @@ function normalize(value: string) {
   return value.toLowerCase().trim();
 }
 
+function scoreEntry(entry: SearchEntry, query: string) {
+  const title = normalize(entry.title);
+  const type = normalize(entry.type);
+  const detail = normalize(entry.detail);
+  const haystack = `${type} ${title} ${detail}`;
+
+  if (!haystack.includes(query)) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  if (title.startsWith(query)) {
+    return 0;
+  }
+
+  if (title.includes(query)) {
+    return 1;
+  }
+
+  if (type.includes(query)) {
+    return 2;
+  }
+
+  return 3;
+}
+
 export function GlobalSearch({ entries, inputId = "global-search" }: { entries: SearchEntry[]; inputId?: string }) {
   const [query, setQuery] = useState("");
   const [isOpen, setIsOpen] = useState(false);
   const normalizedQuery = normalize(query);
+  const resultsId = `${inputId}-results`;
   const results = useMemo(() => {
     if (!normalizedQuery) {
       return [];
     }
 
     return entries
-      .filter((entry) => normalize(`${entry.type} ${entry.title} ${entry.detail}`).includes(normalizedQuery))
+      .map((entry) => ({ entry, score: scoreEntry(entry, normalizedQuery) }))
+      .filter((result) => Number.isFinite(result.score))
+      .sort((first, second) => first.score - second.score || first.entry.title.localeCompare(second.entry.title))
+      .map((result) => result.entry)
       .slice(0, 8);
   }, [entries, normalizedQuery]);
 
@@ -51,13 +80,30 @@ export function GlobalSearch({ entries, inputId = "global-search" }: { entries: 
         }}
         onFocus={() => setIsOpen(true)}
         onBlur={() => window.setTimeout(() => setIsOpen(false), 120)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            setIsOpen(false);
+            event.currentTarget.blur();
+          }
+        }}
+        role="combobox"
+        aria-expanded={isOpen && Boolean(normalizedQuery)}
+        aria-controls={resultsId}
+        aria-autocomplete="list"
         className="min-h-10 w-full rounded-lg border border-zinc-800 bg-zinc-900/80 pl-9 pr-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-300"
         placeholder="Search projects, tasks, inbox, content, media"
       />
       {isOpen && normalizedQuery ? (
-        <div className="absolute left-0 right-0 top-12 z-50 max-h-96 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950 p-2 shadow-2xl shadow-black/40">
+        <div
+          id={resultsId}
+          role="listbox"
+          aria-label="Global search results"
+          className="absolute left-0 right-0 top-12 z-50 max-h-96 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950 p-2 shadow-2xl shadow-black/40"
+        >
           {results.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-zinc-800 p-3 text-sm text-zinc-500">No results found.</div>
+            <div className="rounded-lg border border-dashed border-zinc-800 p-3 text-sm text-zinc-500" role="status">
+              No results found.
+            </div>
           ) : null}
           {results.map((entry) => (
             <Link
@@ -67,6 +113,8 @@ export function GlobalSearch({ entries, inputId = "global-search" }: { entries: 
                 entry.onSelect?.();
                 closeSearch();
               }}
+              role="option"
+              aria-selected="false"
               className="group flex min-h-12 items-center gap-3 rounded-lg px-3 py-2 text-sm transition hover:bg-zinc-900"
             >
               <span className="inline-flex shrink-0 rounded-lg border border-zinc-700 px-2 py-1 text-[11px] font-medium uppercase text-zinc-400">

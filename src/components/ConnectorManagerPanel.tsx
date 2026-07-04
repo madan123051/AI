@@ -2,7 +2,8 @@
 
 import { useState, type FormEvent } from "react";
 import { Camera, Globe2, Mail, Plug, Save, ThumbsUp, type LucideIcon } from "lucide-react";
-import type { Connector, ConnectorStatus, ConnectorType, ContentItem, Message, Project } from "@/lib/types";
+import { WebsiteControlMapPanel } from "@/components/WebsiteControlMapPanel";
+import type { Connector, ConnectorStatus, ConnectorType, ContentItem, Message, Project, Rule, WebsiteControlMapEntry } from "@/lib/types";
 
 type SaveConnectorInput = {
   projectId: string;
@@ -16,6 +17,8 @@ type ConnectorManagerPanelProps = {
   connectors: Connector[];
   messages: Message[];
   contentItems: ContentItem[];
+  websiteControlMap: WebsiteControlMapEntry[];
+  rules: Rule[];
   isSaving: boolean;
   onSaveConnector: (input: SaveConnectorInput) => Promise<void> | void;
 };
@@ -222,6 +225,8 @@ export function ConnectorManagerPanel({
   connectors,
   messages,
   contentItems,
+  websiteControlMap,
+  rules,
   isSaving,
   onSaveConnector,
 }: ConnectorManagerPanelProps) {
@@ -271,6 +276,8 @@ export function ConnectorManagerPanel({
           );
         })}
       </div>
+
+      <WebsiteControlMapPanel project={project} entries={websiteControlMap} rules={rules} />
     </section>
   );
 }

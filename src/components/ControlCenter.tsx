@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Activity, AlertTriangle, Archive, Bell, CalendarDays, Clock3, Coins, Database, FolderKanban, History, Inbox, Layers3, PanelRightOpen, Plus, RefreshCw, RotateCcw, Save, Sigma, Trash2, Workflow, X, Zap } from "lucide-react";
 import { AiRunHistory } from "@/components/AiRunHistory";
@@ -57,6 +58,8 @@ type DashboardNotification = {
   detail: string;
   created_at: string;
   tone: "sky" | "amber" | "emerald" | "violet";
+  href: string;
+  onSelect?: () => void;
 };
 
 const viewConfig: Record<AppView, { title: string; subtitle: string }> = {
@@ -225,7 +228,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
   const selectedLogs = selectedTask
     ? data.action_logs.filter((log) => log.task_id === selectedTask.id).slice(0, 8)
     : data.action_logs.slice(0, 8);
-  const pendingApprovals = data.approvals.filter((approval) => approval.status === "pending");
+  const pendingApprovals = useMemo(() => data.approvals.filter((approval) => approval.status === "pending"), [data.approvals]);
   const selectedProjectMessages = selectedProject ? data.messages.filter((message) => message.project_id === selectedProject.id) : [];
   const selectedProjectContentItems = selectedProject ? data.content_items.filter((item) => item.project_id === selectedProject.id) : [];
   const selectedProjectContentIds = new Set(selectedProjectContentItems.map((item) => item.id));
@@ -234,13 +237,14 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
   const selectedProjectPublishLogs = data.publish_logs.filter((log) => selectedProjectContentIds.has(log.content_item_id));
   const selectedProjectMediaAssets = selectedProject ? data.media_assets.filter((asset) => asset.project_id === selectedProject.id) : [];
   const selectedProjectConnectors = selectedProject ? data.connectors.filter((connector) => connector.project_id === selectedProject.id) : [];
+  const selectedProjectWebsiteControlMap = selectedProject ? data.website_control_map.filter((entry) => entry.project_id === selectedProject.id) : [];
   const selectedProjectAutomationRules = selectedProject ? data.automation_rules.filter((rule) => rule.project_id === selectedProject.id) : [];
-  const inboxUnreadCount = data.messages.filter((message) => message.status === "unread").length;
-  const activeProjects = data.projects.filter((project) => project.status !== "archived");
-  const activeTasks = data.tasks.filter((task) => task.status !== "completed");
+  const inboxUnreadCount = useMemo(() => data.messages.filter((message) => message.status === "unread").length, [data.messages]);
+  const activeProjects = useMemo(() => data.projects.filter((project) => project.status !== "archived"), [data.projects]);
+  const activeTasks = useMemo(() => data.tasks.filter((task) => task.status !== "completed"), [data.tasks]);
   const handoffCount = data.handoff_summaries.length;
-  const totalCost = data.ai_runs.reduce((sum, run) => sum + (run.cost_usd ?? 0), 0);
-  const totalTokens = data.ai_runs.reduce((sum, run) => sum + (run.total_tokens ?? 0), 0);
+  const totalCost = useMemo(() => data.ai_runs.reduce((sum, run) => sum + (run.cost_usd ?? 0), 0), [data.ai_runs]);
+  const totalTokens = useMemo(() => data.ai_runs.reduce((sum, run) => sum + (run.total_tokens ?? 0), 0), [data.ai_runs]);
   const canCreateTask = activeProjects.length > 0 && !isSaving;
   const pendingProject = pendingProjectAction
     ? data.projects.find((project) => project.id === pendingProjectAction.projectId)
@@ -250,183 +254,243 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
   const tomorrow = new Date(now);
   tomorrow.setDate(now.getDate() + 1);
   const tomorrowKey = localDateKey(tomorrow);
-  const contentItemsById = new Map(data.content_items.map((item) => [item.id, item]));
-  const scheduledContent = data.content_schedule.filter((schedule) => schedule.status === "scheduled");
-  const scheduledContentIds = new Set(scheduledContent.map((schedule) => schedule.content_item_id));
-  const scheduledContentCount =
-    scheduledContentIds.size +
-    data.content_items.filter((item) => item.status === "scheduled" && !scheduledContentIds.has(item.id)).length;
-  const aiCostToday = data.ai_runs
-    .filter((run) => localDateKey(new Date(run.created_at)) === todayKey)
-    .reduce((sum, run) => sum + (run.cost_usd ?? 0), 0);
-  const sortedSchedules = scheduledContent
-    .filter((schedule) => schedule.scheduled_for)
-    .slice()
-    .sort((first, second) => String(first.scheduled_for).localeCompare(String(second.scheduled_for)));
-  const todaySchedule = sortedSchedules
-    .filter((schedule) => localDateKey(new Date(String(schedule.scheduled_for))) === todayKey)
-    .slice(0, 5);
-  const upcomingPosts = sortedSchedules
-    .filter((schedule) => new Date(String(schedule.scheduled_for)).getTime() >= now.getTime())
-    .slice(0, 5);
-  const dashboardNotifications: DashboardNotification[] = [
-    ...data.messages
-      .filter((message) => message.status === "unread")
-      .slice(0, 3)
-      .map((message) => ({
-        id: `message-${message.id}`,
-        title: `New ${sourceLabel(message.source)} message received`,
-        detail: message.subject || message.sender_name,
-        created_at: message.received_at,
-        tone: "sky" as const,
-      })),
-    ...pendingApprovals.slice(0, 2).map((approval) => ({
-      id: `approval-${approval.id}`,
-      title: "Action needs review",
-      detail: approval.reason,
-      created_at: approval.created_at,
-      tone: "amber" as const,
-    })),
-    ...sortedSchedules
-      .filter((schedule) => localDateKey(new Date(String(schedule.scheduled_for))) === tomorrowKey)
-      .slice(0, 2)
-      .map((schedule) => ({
-        id: `schedule-${schedule.id}`,
-        title: "Post scheduled for tomorrow",
-        detail: contentItemsById.get(schedule.content_item_id)?.title ?? "Scheduled content",
-        created_at: schedule.scheduled_for ?? schedule.created_at,
-        tone: "emerald" as const,
-      })),
-    ...data.handoff_summaries.slice(0, 2).map((handoff) => ({
-      id: `handoff-${handoff.id}`,
-      title: "AI handoff completed",
-      detail: `${handoff.from_ai} to ${handoff.to_ai}`,
-      created_at: handoff.created_at,
-      tone: "violet" as const,
-    })),
-  ]
-    .slice()
-    .sort((first, second) => second.created_at.localeCompare(first.created_at))
-    .slice(0, 6);
-  const visibleNotifications =
-    dashboardNotifications.length > 0
-      ? dashboardNotifications
-      : [
-          {
-            id: "notifications-ready",
-            title: "Notification center ready",
-            detail: "Emails, comments, schedules, and handoffs will appear here.",
-            created_at: now.toISOString(),
-            tone: "emerald" as const,
-          },
-        ];
-  const projectById = new Map(data.projects.map((project) => [project.id, project]));
-  const taskById = new Map(data.tasks.map((task) => [task.id, task]));
-  const projectName = (projectId?: string) => (projectId ? projectById.get(projectId)?.name ?? "Unknown project" : "No project");
-  const globalSearchEntries: SearchEntry[] = [
-    ...data.projects.map((project) => ({
-      id: `project-${project.id}`,
-      type: "Project",
-      title: project.name,
-      detail: `${project.status} - ${project.description}`,
-      href: "/projects",
-      onSelect: () => setSelectedProjectId(project.id),
-    })),
-    ...data.tasks.map((task) => ({
-      id: `task-${task.id}`,
-      type: "Task",
-      title: task.title,
-      detail: `${projectName(task.project_id)} - ${task.status} - ${task.goal}`,
-      href: "/tasks",
-      onSelect: () => {
-        setSelectedTaskId(task.id);
-        setSelectedProjectId(task.project_id);
-      },
-    })),
-    ...data.messages.map((message) => ({
-      id: `message-${message.id}`,
-      type: "Inbox",
-      title: message.subject || message.sender_name,
-      detail: `${projectName(message.project_id)} - ${message.source} - ${message.body}`,
-      href: "/inbox",
-      onSelect: () => {
-        setSelectedProjectId(message.project_id);
-        if (message.linked_task_id) {
-          setSelectedTaskId(message.linked_task_id);
-        }
-      },
-    })),
-    ...data.content_items.map((item) => ({
-      id: `content-${item.id}`,
-      type: "Content",
-      title: item.title,
-      detail: `${projectName(item.project_id)} - ${item.content_type} - ${item.caption_body}`,
-      href: "/content",
-      onSelect: () => {
-        setSelectedProjectId(item.project_id);
-        if (item.task_id) {
-          setSelectedTaskId(item.task_id);
-        }
-      },
-    })),
-    ...data.media_assets.map((asset) => ({
-      id: `media-${asset.id}`,
-      type: "Media",
-      title: asset.title,
-      detail: `${projectName(asset.project_id)} - ${asset.asset_type} - ${asset.tags.join(", ")}`,
-      href: "/media",
-      onSelect: () => setSelectedProjectId(asset.project_id),
-    })),
-    ...data.connectors.map((connector) => ({
-      id: `connector-${connector.id}`,
-      type: "Connector",
-      title: connector.type,
-      detail: `${projectName(connector.project_id)} - ${connector.status}`,
-      href: "/connectors",
-      onSelect: () => setSelectedProjectId(connector.project_id),
-    })),
-    ...data.automation_rules.map((rule) => ({
-      id: `automation-${rule.id}`,
-      type: "Automation",
-      title: rule.name,
-      detail: `${projectName(rule.project_id)} - ${rule.trigger} - ${rule.action}`,
-      href: "/automation",
-      onSelect: () => setSelectedProjectId(rule.project_id),
-    })),
-    ...data.ai_runs.map((run) => {
-      const task = taskById.get(run.task_id);
+  const projectById = useMemo(() => new Map(data.projects.map((project) => [project.id, project])), [data.projects]);
+  const taskById = useMemo(() => new Map(data.tasks.map((task) => [task.id, task])), [data.tasks]);
+  const projectName = useCallback(
+    (projectId?: string) => (projectId ? projectById.get(projectId)?.name ?? "Unknown project" : "No project"),
+    [projectById],
+  );
+  const contentItemsById = useMemo(() => new Map(data.content_items.map((item) => [item.id, item])), [data.content_items]);
+  const scheduledContent = useMemo(() => data.content_schedule.filter((schedule) => schedule.status === "scheduled"), [data.content_schedule]);
+  const scheduledContentCount = useMemo(() => {
+    const scheduledContentIds = new Set(scheduledContent.map((schedule) => schedule.content_item_id));
 
-      return {
-        id: `run-${run.id}`,
-        type: "AI",
-        title: run.ai_model,
-        detail: `${task?.title ?? "Task"} - ${run.output || run.input}`,
-        href: "/ai-brain",
+    return (
+      scheduledContentIds.size +
+      data.content_items.filter((item) => item.status === "scheduled" && !scheduledContentIds.has(item.id)).length
+    );
+  }, [data.content_items, scheduledContent]);
+  const aiCostToday = useMemo(
+    () =>
+      data.ai_runs
+        .filter((run) => localDateKey(new Date(run.created_at)) === todayKey)
+        .reduce((sum, run) => sum + (run.cost_usd ?? 0), 0),
+    [data.ai_runs, todayKey],
+  );
+  const sortedSchedules = useMemo(
+    () =>
+      scheduledContent
+        .filter((schedule) => schedule.scheduled_for)
+        .slice()
+        .sort((first, second) => String(first.scheduled_for).localeCompare(String(second.scheduled_for))),
+    [scheduledContent],
+  );
+  const todaySchedule = useMemo(
+    () => sortedSchedules.filter((schedule) => localDateKey(new Date(String(schedule.scheduled_for))) === todayKey).slice(0, 5),
+    [sortedSchedules, todayKey],
+  );
+  const upcomingPosts = useMemo(
+    () => sortedSchedules.filter((schedule) => new Date(String(schedule.scheduled_for)).getTime() >= now.getTime()).slice(0, 5),
+    [now, sortedSchedules],
+  );
+  const dashboardNotifications = useMemo<DashboardNotification[]>(
+    () =>
+      [
+        ...data.messages
+          .filter((message) => message.status === "unread")
+          .slice(0, 3)
+          .map((message) => ({
+            id: `message-${message.id}`,
+            title: `New ${sourceLabel(message.source)} message received`,
+            detail: message.subject || message.sender_name,
+            created_at: message.received_at,
+            tone: "sky" as const,
+            href: "/inbox",
+            onSelect: () => {
+              setSelectedProjectId(message.project_id);
+              if (message.linked_task_id) {
+                setSelectedTaskId(message.linked_task_id);
+              }
+            },
+          })),
+        ...pendingApprovals.slice(0, 2).map((approval) => ({
+          id: `approval-${approval.id}`,
+          title: "Action needs review",
+          detail: approval.reason,
+          created_at: approval.created_at,
+          tone: "amber" as const,
+          href: "/approvals",
+        })),
+        ...sortedSchedules
+          .filter((schedule) => localDateKey(new Date(String(schedule.scheduled_for))) === tomorrowKey)
+          .slice(0, 2)
+          .map((schedule) => ({
+            id: `schedule-${schedule.id}`,
+            title: "Post scheduled for tomorrow",
+            detail: contentItemsById.get(schedule.content_item_id)?.title ?? "Scheduled content",
+            created_at: schedule.scheduled_for ?? schedule.created_at,
+            tone: "emerald" as const,
+            href: "/content",
+          })),
+        ...data.handoff_summaries.slice(0, 2).map((handoff) => {
+          const task = taskById.get(handoff.task_id);
+
+          return {
+            id: `handoff-${handoff.id}`,
+            title: "AI handoff completed",
+            detail: `${handoff.from_ai} to ${handoff.to_ai}`,
+            created_at: handoff.created_at,
+            tone: "violet" as const,
+            href: "/ai-brain",
+            onSelect: () => {
+              if (task) {
+                setSelectedTaskId(task.id);
+                setSelectedProjectId(task.project_id);
+              }
+            },
+          };
+        }),
+      ]
+        .slice()
+        .sort((first, second) => second.created_at.localeCompare(first.created_at))
+        .slice(0, 6),
+    [contentItemsById, data.handoff_summaries, data.messages, pendingApprovals, sortedSchedules, taskById, tomorrowKey],
+  );
+  const visibleNotifications = useMemo<DashboardNotification[]>(
+    () =>
+      dashboardNotifications.length > 0
+        ? dashboardNotifications
+        : [
+            {
+              id: "notifications-ready",
+              title: "Notification center ready",
+              detail: "Emails, comments, schedules, and handoffs will appear here.",
+              created_at: now.toISOString(),
+              tone: "emerald" as const,
+              href: "/dashboard#notifications",
+            },
+          ],
+    [dashboardNotifications, now],
+  );
+  const globalSearchEntries = useMemo<SearchEntry[]>(
+    () => [
+      ...data.projects.map((project) => ({
+        id: `project-${project.id}`,
+        type: "Project",
+        title: project.name,
+        detail: `${project.status} - ${project.description}`,
+        href: "/projects",
+        onSelect: () => setSelectedProjectId(project.id),
+      })),
+      ...data.tasks.map((task) => ({
+        id: `task-${task.id}`,
+        type: "Task",
+        title: task.title,
+        detail: `${projectName(task.project_id)} - ${task.status} - ${task.goal}`,
+        href: "/tasks",
         onSelect: () => {
-          if (task) {
-            setSelectedTaskId(task.id);
-            setSelectedProjectId(task.project_id);
+          setSelectedTaskId(task.id);
+          setSelectedProjectId(task.project_id);
+        },
+      })),
+      ...data.messages.map((message) => ({
+        id: `message-${message.id}`,
+        type: "Inbox",
+        title: message.subject || message.sender_name,
+        detail: `${projectName(message.project_id)} - ${message.source} - ${message.body}`,
+        href: "/inbox",
+        onSelect: () => {
+          setSelectedProjectId(message.project_id);
+          if (message.linked_task_id) {
+            setSelectedTaskId(message.linked_task_id);
           }
         },
-      };
-    }),
-    ...data.action_logs.slice(0, 50).map((log) => ({
-      id: `log-${log.id}`,
-      type: "Log",
-      title: log.action,
-      detail: `${log.actor} - ${log.details}`,
-      href: "/analytics",
-      onSelect: () => {
-        if (log.project_id) {
-          setSelectedProjectId(log.project_id);
-        }
+      })),
+      ...data.content_items.map((item) => ({
+        id: `content-${item.id}`,
+        type: "Content",
+        title: item.title,
+        detail: `${projectName(item.project_id)} - ${item.content_type} - ${item.caption_body}`,
+        href: "/content",
+        onSelect: () => {
+          setSelectedProjectId(item.project_id);
+          if (item.task_id) {
+            setSelectedTaskId(item.task_id);
+          }
+        },
+      })),
+      ...data.media_assets.map((asset) => ({
+        id: `media-${asset.id}`,
+        type: "Media",
+        title: asset.title,
+        detail: `${projectName(asset.project_id)} - ${asset.asset_type} - ${asset.tags.join(", ")}`,
+        href: "/media",
+        onSelect: () => setSelectedProjectId(asset.project_id),
+      })),
+      ...data.connectors.map((connector) => ({
+        id: `connector-${connector.id}`,
+        type: "Connector",
+        title: connector.type,
+        detail: `${projectName(connector.project_id)} - ${connector.status}`,
+        href: "/connectors",
+        onSelect: () => setSelectedProjectId(connector.project_id),
+      })),
+      ...data.automation_rules.map((rule) => ({
+        id: `automation-${rule.id}`,
+        type: "Automation",
+        title: rule.name,
+        detail: `${projectName(rule.project_id)} - ${rule.trigger} - ${rule.action}`,
+        href: "/automation",
+        onSelect: () => setSelectedProjectId(rule.project_id),
+      })),
+      ...data.ai_runs.map((run) => {
+        const task = taskById.get(run.task_id);
 
-        if (log.task_id) {
-          setSelectedTaskId(log.task_id);
-        }
-      },
-    })),
-  ];
+        return {
+          id: `run-${run.id}`,
+          type: "AI",
+          title: run.ai_model,
+          detail: `${task?.title ?? "Task"} - ${run.output || run.input}`,
+          href: "/ai-brain",
+          onSelect: () => {
+            if (task) {
+              setSelectedTaskId(task.id);
+              setSelectedProjectId(task.project_id);
+            }
+          },
+        };
+      }),
+      ...data.action_logs.slice(0, 50).map((log) => ({
+        id: `log-${log.id}`,
+        type: "Log",
+        title: log.action,
+        detail: `${log.actor} - ${log.details}`,
+        href: "/analytics",
+        onSelect: () => {
+          if (log.project_id) {
+            setSelectedProjectId(log.project_id);
+          }
+
+          if (log.task_id) {
+            setSelectedTaskId(log.task_id);
+          }
+        },
+      })),
+    ],
+    [
+      data.action_logs,
+      data.ai_runs,
+      data.automation_rules,
+      data.connectors,
+      data.content_items,
+      data.media_assets,
+      data.messages,
+      data.projects,
+      data.tasks,
+      projectName,
+      taskById,
+    ],
+  );
 
   async function handleCreateProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1177,9 +1241,9 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     }
   }
 
-  const currentView = viewConfig[view];
-  const recentLogs = data.action_logs.slice(0, 8);
-  const recentAiRuns = data.ai_runs.slice(0, 6);
+  const currentView = viewConfig[view] ?? viewConfig.dashboard;
+  const recentLogs = useMemo(() => data.action_logs.slice(0, 8), [data.action_logs]);
+  const recentAiRuns = useMemo(() => data.ai_runs.slice(0, 6), [data.ai_runs]);
 
   const projectActionDialog = pendingProjectAction && pendingProject ? (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/75 px-4">
@@ -1258,7 +1322,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
   ) : null;
 
   const databaseAlert = loadError ? (
-    <section className="rounded-lg border border-amber-400/40 bg-amber-400/10 p-4 text-sm leading-6 text-amber-100">
+    <section className="rounded-lg border border-amber-400/40 bg-amber-400/10 p-4 text-sm leading-6 text-amber-100" aria-live="polite">
       <div className="flex items-start gap-3">
         <Database className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
         <div className="min-w-0">
@@ -1269,6 +1333,12 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
       </div>
     </section>
   ) : null;
+  const loadingAlert =
+    !isReady && !loadError ? (
+      <section className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-4 text-sm text-zinc-400" role="status" aria-live="polite">
+        Loading Supabase workspace data...
+      </section>
+    ) : null;
 
   const projectForm = (
     <form onSubmit={handleCreateProject} className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-4">
@@ -1433,12 +1503,14 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         title={currentView.title}
         subtitle={currentView.subtitle}
         notificationCount={dashboardNotifications.length}
+        notificationsHref="/dashboard#notifications"
         toolbar={desktopToolbar}
         mobileToolbar={mobileToolbar}
         onReload={() => void refreshDashboard()}
       >
         {projectActionDialog}
         {databaseAlert}
+        {loadingAlert}
         {content}
       </AppShell>
     );
@@ -1498,16 +1570,21 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
             </div>
             <div className="space-y-3">
               {visibleNotifications.map((notification) => (
-                <article key={notification.id} className="flex gap-3 rounded-lg border border-zinc-800 bg-zinc-900/70 p-3">
+                <Link
+                  key={notification.id}
+                  href={notification.href}
+                  onClick={notification.onSelect}
+                  className="group flex gap-3 rounded-lg border border-zinc-800 bg-zinc-900/70 p-3 transition hover:border-emerald-300/60 hover:bg-zinc-900"
+                >
                   <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${notificationToneClass(notification.tone)}`} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-3 text-xs text-zinc-500">
-                      <h3 className="truncate font-medium text-zinc-200">{notification.title}</h3>
+                      <h3 className="truncate font-medium text-zinc-200 transition group-hover:text-emerald-100">{notification.title}</h3>
                       <time dateTime={notification.created_at}>{formatTime(notification.created_at)}</time>
                     </div>
                     <p className="mt-1 line-clamp-2 break-words text-sm leading-6 text-zinc-400">{notification.detail}</p>
                   </div>
-                </article>
+                </Link>
               ))}
             </div>
           </div>
@@ -1734,6 +1811,8 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         connectors={selectedProjectConnectors}
         messages={selectedProjectMessages}
         contentItems={selectedProjectContentItems}
+        websiteControlMap={selectedProjectWebsiteControlMap}
+        rules={data.rules}
         isSaving={isSaving}
         onSaveConnector={handleSaveConnector}
       />,

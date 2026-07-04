@@ -22,6 +22,7 @@ import type {
   HandoffPack,
   HandoffSummary,
   MediaAsset,
+  MediaLinkTarget,
   MediaAssetStatus,
   MediaAssetType,
   Message,
@@ -35,6 +36,9 @@ import type {
   Task,
   TaskState,
   TokenUsage,
+  WebsiteControlAction,
+  WebsiteControlMapEntry,
+  WebsiteControlStatus,
 } from "@/lib/types";
 
 type SupabaseLikeError = { code?: string; message: string } | null;
@@ -105,8 +109,15 @@ type PublishLogRow = PublishLog & {
 
 type MediaAssetRow = MediaAsset & {
   content_item_id?: string | null;
+  status?: MediaAssetStatus | "available" | "attached" | null;
   metadata?: Record<string, unknown> | null;
   tags?: string[] | null;
+  updated_at?: string | null;
+};
+
+type WebsiteControlMapRow = WebsiteControlMapEntry & {
+  action_statuses?: Partial<Record<WebsiteControlAction, WebsiteControlStatus>> | null;
+  metadata?: Record<string, unknown> | null;
   updated_at?: string | null;
 };
 
@@ -124,6 +135,7 @@ export function emptyControlCenterData(): ControlCenterData {
     action_logs: [],
     approvals: [],
     connectors: [],
+    website_control_map: [],
     messages: [],
     content_items: [],
     content_routes: [],
@@ -260,6 +272,195 @@ function normalizeConnector(row: ConnectorRow): Connector {
     created_at: row.created_at,
     updated_at: row.updated_at ?? row.created_at,
   };
+}
+
+function isWebsiteControlStatus(value: unknown): value is WebsiteControlStatus {
+  return value === "available" || value === "review_required" || value === "blocked";
+}
+
+function normalizeWebsiteControlStatus(value: unknown): WebsiteControlStatus {
+  return isWebsiteControlStatus(value) ? value : "review_required";
+}
+
+function normalizeWebsiteActionStatuses(value: unknown): Partial<Record<WebsiteControlAction, WebsiteControlStatus>> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const source = value as Record<string, unknown>;
+  const normalized: Partial<Record<WebsiteControlAction, WebsiteControlStatus>> = {};
+
+  for (const action of ["create", "update", "delete", "publish", "reply"] as WebsiteControlAction[]) {
+    if (isWebsiteControlStatus(source[action])) {
+      normalized[action] = source[action];
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeWebsiteControlMapEntry(row: WebsiteControlMapRow): WebsiteControlMapEntry {
+  return {
+    id: row.id,
+    project_id: row.project_id,
+    collection_name: row.collection_name,
+    display_name: row.display_name || row.collection_name,
+    create_action: row.create_action ?? "",
+    update_action: row.update_action ?? "",
+    delete_action: row.delete_action ?? "",
+    publish_behavior: row.publish_behavior ?? "",
+    source_file: row.source_file ?? "",
+    source_function: row.source_function ?? "",
+    status: normalizeWebsiteControlStatus(row.status),
+    action_statuses: normalizeWebsiteActionStatuses(row.action_statuses),
+    metadata: row.metadata ?? {},
+    created_at: row.created_at,
+    updated_at: row.updated_at ?? row.created_at,
+  };
+}
+
+function defaultWebsiteControlMapEntries(projectId: string): WebsiteControlMapEntry[] {
+  const now = new Date().toISOString();
+  const base = {
+    project_id: projectId,
+    metadata: { source: "wildsaura_audit", writes_enabled: false, persisted: false },
+    created_at: now,
+    updated_at: now,
+  };
+
+  return [
+    {
+      ...base,
+      id: `default-control-${projectId}-photos`,
+      collection_name: "photos",
+      display_name: "Photos",
+      create_action: "addPhotoToFirestore",
+      update_action: "updatePhotoInFirestore",
+      delete_action: "deletePhotoFromFirestore",
+      publish_behavior: "Create writes live Wildsaura photos with status approved, isPublic true, and published true.",
+      source_file: "work/wildsaura/src/services/photoService.ts",
+      source_function: "addPhotoToFirestore / updatePhotoInFirestore / deletePhotoFromFirestore",
+      status: "review_required",
+      action_statuses: { create: "review_required", update: "review_required", delete: "blocked", publish: "review_required" },
+    },
+    {
+      ...base,
+      id: `default-control-${projectId}-stories`,
+      collection_name: "stories",
+      display_name: "Stories",
+      create_action: "addStoryToFirestore",
+      update_action: "updateStoryInFirestore",
+      delete_action: "deleteStoryFromFirestore",
+      publish_behavior: "Stories become visible through the live stories subscription after create.",
+      source_file: "work/wildsaura/src/services/storyService.ts",
+      source_function: "addStoryToFirestore / updateStoryInFirestore / deleteStoryFromFirestore",
+      status: "review_required",
+      action_statuses: { create: "review_required", update: "review_required", delete: "blocked", publish: "review_required" },
+    },
+    {
+      ...base,
+      id: `default-control-${projectId}-videos`,
+      collection_name: "videos",
+      display_name: "Videos",
+      create_action: "addVideoToFirestore",
+      update_action: "updateVideoInFirestore",
+      delete_action: "deleteVideoFromFirestore",
+      publish_behavior: "Videos become visible through the live videos subscription after create.",
+      source_file: "work/wildsaura/src/services/videoService.ts",
+      source_function: "addVideoToFirestore / updateVideoInFirestore / deleteVideoFromFirestore",
+      status: "review_required",
+      action_statuses: { create: "review_required", update: "review_required", delete: "blocked", publish: "review_required" },
+    },
+    {
+      ...base,
+      id: `default-control-${projectId}-comments`,
+      collection_name: "comments",
+      display_name: "Comments",
+      create_action: "addCommentToFirestore",
+      update_action: "not implemented",
+      delete_action: "deleteCommentFromFirestore",
+      publish_behavior: "Inbound photo, story, and video comments are captured into AI Control Center; AI replies require review.",
+      source_file: "work/wildsaura/src/services/commentService.ts",
+      source_function: "addCommentToFirestore / deleteCommentFromFirestore / sendToAiControlCenter",
+      status: "available",
+      action_statuses: { create: "available", update: "blocked", delete: "blocked", publish: "review_required", reply: "review_required" },
+    },
+    {
+      ...base,
+      id: `default-control-${projectId}-community-posts`,
+      collection_name: "community_posts",
+      display_name: "Community Posts",
+      create_action: "handleSubmitPost",
+      update_action: "handleEditPost",
+      delete_action: "handleDeletePost",
+      publish_behavior: "Community posts and comments are live after authenticated Firestore writes; comment replies require review.",
+      source_file: "work/wildsaura/src/components/CommunityPage.tsx",
+      source_function: "handleSubmitPost / handleEditPost / handleDeletePost / handleComment",
+      status: "review_required",
+      action_statuses: { create: "review_required", update: "review_required", delete: "blocked", publish: "review_required", reply: "review_required" },
+    },
+  ];
+}
+
+async function ensureDefaultWebsiteRules(supabase: SupabaseClientInstance, rules: Rule[]) {
+  const requiredRules: Array<Omit<Rule, "id">> = [
+    { name: "Create Draft", action: "draft_content", effect: "allow", enabled: true },
+    { name: "Publish Content", action: "publish_content", effect: "review", enabled: true },
+    { name: "Update Live Content", action: "update_live_content", effect: "review", enabled: true },
+    { name: "Delete Resource", action: "delete_resource", effect: "block", enabled: true },
+    { name: "Reply Comment", action: "reply_comment", effect: "review", enabled: true },
+  ];
+  const existingActions = new Set(rules.map((rule) => rule.action));
+  const missingRules = requiredRules.filter((rule) => !existingActions.has(rule.action));
+
+  if (missingRules.length === 0) {
+    return rules;
+  }
+
+  const result = await supabase.from("rules").insert(missingRules).select("*");
+  throwUnlessMissingTable("Seed website control rules", result.error);
+
+  return [...rules, ...(((result.data ?? []) as Rule[]).map(normalizeRule))];
+}
+
+async function ensureWebsiteControlMapEntries(
+  supabase: SupabaseClientInstance,
+  projects: Project[],
+  rows: WebsiteControlMapEntry[],
+) {
+  if (projects.length === 0) {
+    return rows;
+  }
+
+  const missingRows = projects.flatMap((project) => {
+    const existingCollectionNames = new Set(rows.filter((row) => row.project_id === project.id).map((row) => row.collection_name));
+
+    return defaultWebsiteControlMapEntries(project.id)
+      .filter((entry) => !existingCollectionNames.has(entry.collection_name))
+      .map((entry) => ({
+        project_id: entry.project_id,
+        collection_name: entry.collection_name,
+        display_name: entry.display_name,
+        create_action: entry.create_action,
+        update_action: entry.update_action,
+        delete_action: entry.delete_action,
+        publish_behavior: entry.publish_behavior,
+        source_file: entry.source_file,
+        source_function: entry.source_function,
+        status: entry.status,
+        action_statuses: entry.action_statuses,
+        metadata: { ...entry.metadata, persisted: true },
+      }));
+  });
+
+  if (missingRows.length === 0) {
+    return rows;
+  }
+
+  const result = await supabase.from("website_control_map").insert(missingRows).select("*");
+  throwUnlessMissingTable("Seed website control map", result.error);
+
+  return [...rows, ...(((result.data ?? []) as WebsiteControlMapRow[]).map(normalizeWebsiteControlMapEntry))];
 }
 
 function isConnectorType(value: unknown): value is ConnectorType {
@@ -441,22 +642,71 @@ function isMediaAssetType(value: unknown): value is MediaAssetType {
 }
 
 function isMediaAssetStatus(value: unknown): value is MediaAssetStatus {
-  return value === "available" || value === "attached" || value === "archived";
+  return value === "draft" || value === "published" || value === "archived";
+}
+
+function isMediaLinkTarget(value: unknown): value is MediaLinkTarget {
+  return value === "photo" || value === "story" || value === "video" || value === "content";
+}
+
+function metadataString(metadata: Record<string, unknown> | undefined, key: string) {
+  const value = metadata?.[key];
+  return typeof value === "string" ? value : "";
+}
+
+function normalizeMediaAssetStatus(status: unknown, metadata: Record<string, unknown> | undefined): MediaAssetStatus {
+  const workflowStatus = metadataString(metadata, "workflow_status");
+
+  if (isMediaAssetStatus(workflowStatus)) {
+    return workflowStatus;
+  }
+
+  if (isMediaAssetStatus(status)) {
+    return status;
+  }
+
+  if (status === "attached") {
+    return "published";
+  }
+
+  return status === "archived" ? "archived" : "draft";
+}
+
+function legacyMediaStatus(status: MediaAssetStatus) {
+  if (status === "published") {
+    return "attached";
+  }
+
+  if (status === "archived") {
+    return "archived";
+  }
+
+  return "available";
+}
+
+function isLegacyMediaStatusError(error: SupabaseLikeError) {
+  return Boolean(error?.code === "23514" || error?.message.includes("media_assets_status_check"));
 }
 
 function normalizeMediaAsset(row: MediaAssetRow): MediaAsset {
+  const metadata = row.metadata ?? {};
+  const linkedCollection = metadataString(metadata, "linked_collection");
+
   return {
     id: row.id,
     project_id: row.project_id,
     content_item_id: row.content_item_id ?? undefined,
+    linked_collection: isMediaLinkTarget(linkedCollection) ? linkedCollection : undefined,
+    linked_item_id: metadataString(metadata, "linked_item_id") || row.content_item_id || undefined,
+    linked_item_label: metadataString(metadata, "linked_item_label") || undefined,
     title: row.title,
     asset_type: isMediaAssetType(row.asset_type) ? row.asset_type : "image",
     source_url: row.source_url ?? "",
     storage_path: row.storage_path ?? "",
     alt_text: row.alt_text ?? "",
     tags: row.tags ?? [],
-    status: isMediaAssetStatus(row.status) ? row.status : "available",
-    metadata: row.metadata ?? {},
+    status: normalizeMediaAssetStatus(row.status, metadata),
+    metadata,
     created_at: row.created_at,
     updated_at: row.updated_at ?? row.created_at,
   };
@@ -872,6 +1122,7 @@ export async function loadControlCenterData(): Promise<ControlCenterData> {
     rulesResult,
     memoryResult,
     connectorsResult,
+    websiteControlMapResult,
     messagesResult,
     contentItemsResult,
     contentRoutesResult,
@@ -890,6 +1141,7 @@ export async function loadControlCenterData(): Promise<ControlCenterData> {
     supabase.from("rules").select("*").order("created_at", { ascending: true }),
     supabase.from("project_memory").select("*"),
     supabase.from("connectors").select("*").order("created_at", { ascending: false }),
+    supabase.from("website_control_map").select("*").order("collection_name", { ascending: true }),
     supabase.from("messages").select("*").order("created_at", { ascending: false }).limit(80),
     supabase.from("content_items").select("*").order("created_at", { ascending: false }).limit(80),
     supabase.from("content_routes").select("*").order("created_at", { ascending: false }).limit(200),
@@ -909,6 +1161,7 @@ export async function loadControlCenterData(): Promise<ControlCenterData> {
   throwUnlessMissingTable("Load rules", rulesResult.error);
   throwUnlessMissingTable("Load project memory", memoryResult.error);
   throwUnlessMissingTable("Load connectors", connectorsResult.error);
+  throwUnlessMissingTable("Load website control map", websiteControlMapResult.error);
   throwUnlessMissingTable("Load messages", messagesResult.error);
   throwUnlessMissingTable("Load content items", contentItemsResult.error);
   throwUnlessMissingTable("Load content routes", contentRoutesResult.error);
@@ -927,7 +1180,16 @@ export async function loadControlCenterData(): Promise<ControlCenterData> {
   const memories = isMissingTable(memoryResult.error)
     ? []
     : ((memoryResult.data ?? []) as Array<ProjectMemory & { target_channels?: string[] | null; notes?: string | null }>).map(normalizeProjectMemory);
-  const rules = isMissingTable(rulesResult.error) ? defaultRules : ((rulesResult.data ?? []) as Rule[]).map(normalizeRule);
+  let rules = isMissingTable(rulesResult.error) ? defaultRules : ((rulesResult.data ?? []) as Rule[]).map(normalizeRule);
+  if (!isMissingTable(rulesResult.error)) {
+    rules = await ensureDefaultWebsiteRules(supabase, rules);
+  }
+  const websiteControlMapRows = isMissingTable(websiteControlMapResult.error)
+    ? projects.flatMap((project) => defaultWebsiteControlMapEntries(project.id))
+    : ((websiteControlMapResult.data ?? []) as WebsiteControlMapRow[]).map(normalizeWebsiteControlMapEntry);
+  const websiteControlMap = isMissingTable(websiteControlMapResult.error)
+    ? websiteControlMapRows
+    : await ensureWebsiteControlMapEntries(supabase, projects, websiteControlMapRows);
 
   return {
     projects,
@@ -940,6 +1202,7 @@ export async function loadControlCenterData(): Promise<ControlCenterData> {
     ai_runs: isMissingTable(runsResult.error) ? [] : ((runsResult.data ?? []) as AiRunRow[]).map(normalizeRun),
     approvals: isMissingTable(approvalsResult.error) ? [] : ((approvalsResult.data ?? []) as Approval[]),
     connectors: isMissingTable(connectorsResult.error) ? [] : ((connectorsResult.data ?? []) as ConnectorRow[]).map(normalizeConnector),
+    website_control_map: websiteControlMap,
     messages: isMissingTable(messagesResult.error) ? [] : ((messagesResult.data ?? []) as MessageRow[]).map(normalizeMessage),
     content_items: isMissingTable(contentItemsResult.error) ? [] : ((contentItemsResult.data ?? []) as ContentItemRow[]).map(normalizeContentItem),
     content_routes: isMissingTable(contentRoutesResult.error) ? [] : ((contentRoutesResult.data ?? []) as ContentRouteRow[]).map(normalizeContentRoute),
@@ -2002,6 +2265,9 @@ export async function attemptDeleteContentInDb(input: { item: ContentItem; rules
 export async function createMediaAssetInDb(input: {
   projectId: string;
   content_item_id?: string;
+  linked_collection?: MediaLinkTarget;
+  linked_item_id?: string;
+  linked_item_label?: string;
   title: string;
   asset_type: MediaAssetType;
   source_url: string;
@@ -2009,29 +2275,49 @@ export async function createMediaAssetInDb(input: {
   alt_text: string;
   tags: string[];
   status: MediaAssetStatus;
+  upload_metadata: Record<string, string>;
   notes: string;
 }) {
   assertSupabaseReady();
   const supabase = getSupabaseClient();
   const now = new Date().toISOString();
-  const assetResult = await supabase
+
+  const metadata = {
+    notes: input.notes.trim(),
+    workflow_status: input.status,
+    linked_collection: input.linked_collection ?? (input.content_item_id ? "content" : ""),
+    linked_item_id: input.linked_item_id ?? input.content_item_id ?? "",
+    linked_item_label: input.linked_item_label ?? "",
+    upload_metadata: input.upload_metadata,
+    writes_enabled: false,
+  };
+  const mediaPayload = (status: string) => ({
+    project_id: input.projectId,
+    content_item_id: input.content_item_id ?? null,
+    title: input.title.trim(),
+    asset_type: input.asset_type,
+    source_url: input.source_url.trim(),
+    storage_path: input.storage_path.trim(),
+    alt_text: input.alt_text.trim(),
+    tags: input.tags,
+    status,
+    metadata,
+    created_at: now,
+    updated_at: now,
+  });
+  let assetResult = await supabase
     .from("media_assets")
-    .insert({
-      project_id: input.projectId,
-      content_item_id: input.content_item_id ?? null,
-      title: input.title.trim(),
-      asset_type: input.asset_type,
-      source_url: input.source_url.trim(),
-      storage_path: input.storage_path.trim(),
-      alt_text: input.alt_text.trim(),
-      tags: input.tags,
-      status: input.content_item_id ? "attached" : input.status,
-      metadata: { notes: input.notes.trim() },
-      created_at: now,
-      updated_at: now,
-    })
+    .insert(mediaPayload(input.status))
     .select("*")
     .single();
+
+  if (isLegacyMediaStatusError(assetResult.error)) {
+    assetResult = await supabase
+      .from("media_assets")
+      .insert(mediaPayload(legacyMediaStatus(input.status)))
+      .select("*")
+      .single();
+  }
 
   if (isMissingTable(assetResult.error)) {
     throw new Error("Media library table is missing. Run database/schema.sql in Supabase SQL editor, then press Reload.");
@@ -2062,12 +2348,25 @@ export async function updateMediaAssetStatusInDb(asset: MediaAsset, status: Medi
   assertSupabaseReady();
   const supabase = getSupabaseClient();
   const now = new Date().toISOString();
-  const assetResult = await supabase
+  const metadata = {
+    ...asset.metadata,
+    workflow_status: status,
+  };
+  let assetResult = await supabase
     .from("media_assets")
-    .update({ status, updated_at: now })
+    .update({ status, metadata, updated_at: now })
     .eq("id", asset.id)
     .select("*")
     .single();
+
+  if (isLegacyMediaStatusError(assetResult.error)) {
+    assetResult = await supabase
+      .from("media_assets")
+      .update({ status: legacyMediaStatus(status), metadata, updated_at: now })
+      .eq("id", asset.id)
+      .select("*")
+      .single();
+  }
 
   if (isMissingTable(assetResult.error)) {
     throw new Error("Media library table is missing. Run database/schema.sql in Supabase SQL editor, then press Reload.");
@@ -2075,7 +2374,7 @@ export async function updateMediaAssetStatusInDb(asset: MediaAsset, status: Medi
 
   throwIfError("Update media asset", assetResult.error);
   const updatedAsset = normalizeMediaAsset(assetResult.data as MediaAssetRow);
-  const action = status === "archived" ? "media.archived" : "media.restored";
+  const action = status === "archived" ? "media.archived" : status === "published" ? "media.published" : "media.drafted";
   const log =
     (await insertActionLog(supabase, {
       project_id: asset.project_id,
@@ -2533,6 +2832,7 @@ export async function deleteProjectInDb(project: Project) {
   await deleteEq(supabase, "messages", "project_id", project.id, "Delete linked messages");
   await deleteEq(supabase, "content_posts", "project_id", project.id, "Delete project content posts");
   await deleteEq(supabase, "connectors", "project_id", project.id, "Delete linked connectors");
+  await deleteEq(supabase, "website_control_map", "project_id", project.id, "Delete linked website control map");
   await deleteEq(supabase, "automation_rules", "project_id", project.id, "Delete linked automation rules");
   await deleteEq(supabase, "project_memory", "project_id", project.id, "Delete project memory");
   await deleteEq(supabase, "action_logs", "project_id", project.id, "Delete project history");
