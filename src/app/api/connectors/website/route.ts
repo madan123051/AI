@@ -100,6 +100,7 @@ export async function POST(request: Request) {
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Website connector failed.";
+    console.error("Website connector failed:", message);
     return errorResponse(message, 500);
   }
 }
