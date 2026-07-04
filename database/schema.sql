@@ -174,6 +174,14 @@ create table if not exists public.approvals (
   requested_action text not null default 'review',
   reason text not null default '',
   status text not null default 'pending',
+  action_type text not null default 'reply_message',
+  connector text not null default 'website',
+  target_id text not null default '',
+  target_type text not null default 'message',
+  draft_text text not null default '',
+  metadata jsonb not null default '{}'::jsonb,
+  execution_status text not null default 'pending_review',
+  execution_error text,
   created_at timestamptz not null default now(),
   resolved_at timestamptz
 );
@@ -182,6 +190,14 @@ alter table public.approvals add column if not exists title text not null defaul
 alter table public.approvals add column if not exists requested_action text not null default 'review';
 alter table public.approvals add column if not exists reason text not null default '';
 alter table public.approvals add column if not exists status text not null default 'pending';
+alter table public.approvals add column if not exists action_type text not null default 'reply_message';
+alter table public.approvals add column if not exists connector text not null default 'website';
+alter table public.approvals add column if not exists target_id text not null default '';
+alter table public.approvals add column if not exists target_type text not null default 'message';
+alter table public.approvals add column if not exists draft_text text not null default '';
+alter table public.approvals add column if not exists metadata jsonb not null default '{}'::jsonb;
+alter table public.approvals add column if not exists execution_status text not null default 'pending_review';
+alter table public.approvals add column if not exists execution_error text;
 alter table public.approvals add column if not exists created_at timestamptz not null default now();
 alter table public.approvals add column if not exists resolved_at timestamptz;
 alter table public.approvals drop column if exists owner_id;
@@ -192,6 +208,15 @@ begin
     alter table public.approvals add constraint approvals_status_check check (status in ('pending', 'approved', 'rejected'));
   end if;
 end $$;
+
+alter table public.approvals drop constraint if exists approvals_action_type_check;
+alter table public.approvals add constraint approvals_action_type_check check (action_type in ('reply_comment', 'reply_message', 'send_email', 'publish_content', 'update_content'));
+
+alter table public.approvals drop constraint if exists approvals_connector_check;
+alter table public.approvals add constraint approvals_connector_check check (connector in ('website', 'email', 'instagram', 'facebook'));
+
+alter table public.approvals drop constraint if exists approvals_execution_status_check;
+alter table public.approvals add constraint approvals_execution_status_check check (execution_status in ('pending_review', 'approved', 'executing', 'executed', 'failed', 'execution_pending'));
 
 create table if not exists public.rules (
   id uuid primary key default gen_random_uuid(),
@@ -252,10 +277,10 @@ alter table public.connectors add column if not exists updated_at timestamptz no
 alter table public.connectors drop column if exists owner_id;
 
 alter table public.connectors drop constraint if exists connectors_type_check;
-alter table public.connectors add constraint connectors_type_check check (type in ('gmail', 'instagram', 'facebook', 'website', 'viber', 'storage'));
+alter table public.connectors add constraint connectors_type_check check (type in ('email', 'gmail', 'instagram', 'facebook', 'website', 'viber', 'storage'));
 
 alter table public.connectors drop constraint if exists connectors_status_check;
-alter table public.connectors add constraint connectors_status_check check (status in ('not_connected', 'connected', 'paused'));
+alter table public.connectors add constraint connectors_status_check check (status in ('not_connected', 'not_configured', 'configured', 'test_pending', 'connected', 'error', 'paused'));
 
 create table if not exists public.website_control_map (
   id uuid primary key default gen_random_uuid(),

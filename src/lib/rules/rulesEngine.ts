@@ -87,6 +87,15 @@ export function evaluateAction(action: string, rules = defaultRules): RuleDecisi
 
 export function createApprovalForAction(taskId: string, action: string, reason: string): Approval {
   const now = new Date().toISOString();
+  const actionType = action === "send_email"
+    ? "send_email"
+    : action === "update_content" || action === "update_live_content"
+      ? "update_content"
+      : action === "reply_comment"
+        ? "reply_comment"
+        : action === "reply_message"
+          ? "reply_message"
+          : "publish_content";
 
   return {
     id: `approval-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
@@ -95,6 +104,16 @@ export function createApprovalForAction(taskId: string, action: string, reason: 
     requested_action: action,
     reason,
     status: "pending",
+    action_type: actionType,
+    connector: actionType === "send_email" ? "email" : "website",
+    target_id: taskId,
+    target_type: "task",
+    draft_text: "",
+    metadata: {
+      source: "rules_engine",
+      original_action: action,
+    },
+    execution_status: "pending_review",
     created_at: now,
   };
 }

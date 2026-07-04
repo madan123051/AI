@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { Camera, Globe2, Mail, Plug, Save, ThumbsUp, type LucideIcon } from "lucide-react";
+import { EmailConnectorSetupPanel } from "@/components/EmailConnectorSetupPanel";
 import { WebsiteControlMapPanel } from "@/components/WebsiteControlMapPanel";
 import type { Connector, ConnectorStatus, ConnectorType, ContentItem, Message, Project, Rule, WebsiteControlMapEntry } from "@/lib/types";
 
@@ -86,8 +87,16 @@ function statusClass(status: ConnectorStatus) {
     return "border-emerald-300/40 bg-emerald-300/10 text-emerald-100";
   }
 
+  if (status === "configured" || status === "test_pending") {
+    return "border-sky-300/40 bg-sky-300/10 text-sky-100";
+  }
+
   if (status === "paused") {
     return "border-amber-300/40 bg-amber-300/10 text-amber-100";
+  }
+
+  if (status === "error") {
+    return "border-rose-300/40 bg-rose-300/10 text-rose-100";
   }
 
   return "border-zinc-700 bg-zinc-900 text-zinc-300";
@@ -232,6 +241,7 @@ export function ConnectorManagerPanel({
 }: ConnectorManagerPanelProps) {
   const connectedCount = connectors.filter((connector) => connector.status === "connected").length;
   const pausedCount = connectors.filter((connector) => connector.status === "paused").length;
+  const emailConnector = connectors.find((connector) => connector.type === "email");
 
   return (
     <section className="flex flex-col gap-6">
@@ -252,6 +262,14 @@ export function ConnectorManagerPanel({
           <p className="mt-3 truncate text-2xl font-semibold text-zinc-50">{project?.name ?? "No project"}</p>
         </div>
       </div>
+
+      <EmailConnectorSetupPanel
+        key={`${project?.id ?? "no-project"}-${emailConnector?.updated_at ?? emailConnector?.created_at ?? "email-draft"}`}
+        project={project}
+        connector={emailConnector}
+        isSaving={isSaving}
+        onSaveConnector={onSaveConnector}
+      />
 
       <div className="grid gap-4 lg:grid-cols-2">
         {connectorDefinitions.map((definition) => {

@@ -51,7 +51,7 @@ export async function POST(request: Request) {
       state: persisted.state,
       run: persisted.run ?? result.run,
       handoff: persisted.handoff ?? result.handoff,
-      approval: result.approval,
+      approval: persisted.approval ?? result.approval,
       log: persisted.log,
       ai_result: result.aiResult,
     });

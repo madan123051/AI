@@ -2,6 +2,8 @@ export type TaskStatus = "queued" | "in_progress" | "needs_review" | "completed"
 export type AiModelId = "gpt" | "gemini" | "claude" | "codex" | "deepseek";
 export type Priority = "low" | "medium" | "high";
 export type ApprovalStatus = "pending" | "approved" | "rejected";
+export type ApprovalActionType = "reply_comment" | "reply_message" | "send_email" | "publish_content" | "update_content";
+export type ApprovalExecutionStatus = "pending_review" | "approved" | "executing" | "executed" | "failed" | "execution_pending";
 export type ProjectStatus = "active" | "archived";
 export type RuleEffect = "allow" | "review" | "block";
 export type MessageSource = "gmail" | "website" | "instagram" | "facebook" | "viber";
@@ -13,8 +15,8 @@ export type ContentAiAction = "generate_caption" | "generate_hashtags" | "genera
 export type MediaAssetType = "image" | "video" | "document" | "audio" | "other";
 export type MediaAssetStatus = "draft" | "published" | "archived";
 export type MediaLinkTarget = "photo" | "story" | "video" | "content";
-export type ConnectorType = "gmail" | "instagram" | "facebook" | "website" | "viber" | "storage";
-export type ConnectorStatus = "not_connected" | "connected" | "paused";
+export type ConnectorType = "email" | "gmail" | "instagram" | "facebook" | "website" | "viber" | "storage";
+export type ConnectorStatus = "not_connected" | "not_configured" | "configured" | "test_pending" | "connected" | "error" | "paused";
 export type WebsiteControlStatus = "available" | "review_required" | "blocked";
 export type WebsiteControlAction = "create" | "update" | "delete" | "publish" | "reply";
 export type AutomationStatus = "active" | "paused";
@@ -163,6 +165,14 @@ export interface Approval {
   requested_action: string;
   reason: string;
   status: ApprovalStatus;
+  action_type: ApprovalActionType;
+  connector: "website" | "email" | "instagram" | "facebook";
+  target_id: string;
+  target_type: string;
+  draft_text: string;
+  metadata: Record<string, unknown>;
+  execution_status: ApprovalExecutionStatus;
+  execution_error?: string;
   created_at: string;
   resolved_at?: string;
 }
