@@ -36,6 +36,7 @@ import {
   mockPublishContentInDb,
   persistGeneratedHandoff,
   persistTaskTransition,
+  requestReplyApprovalForMessageInDb,
   runAutomationRuleNowInDb,
   runContentAiActionInDb,
   updateAutomationRuleStatusInDb,
@@ -78,6 +79,13 @@ const viewConfig: Record<AppView, { title: string; subtitle: string }> = {
   automation: { title: "Automation", subtitle: "Mock workflows and routing" },
   settings: { title: "Settings", subtitle: "Application configuration" },
 };
+
+const REPLY_APPROVAL_PREFIX = "reply_comment:";
+const PUBLISH_APPROVAL_PREFIX = "publish_content:";
+
+function approvalTargetId(requestedAction: string, prefix: string) {
+  return requestedAction.startsWith(prefix) ? requestedAction.slice(prefix.length) : "";
+}
 
 function newId(prefix: string) {
   const value = typeof globalThis.crypto?.randomUUID === "function"
@@ -665,6 +673,41 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     }
   }
 
+  async function handleRequestReplyApproval(messageId: string) {
+    const message = data.messages.find((item) => item.id === messageId);
+
+    if (!message) {
+      return;
+    }
+
+    setIsSaving(true);
+    setLoadError("");
+
+    try {
+      const result = await requestReplyApprovalForMessageInDb(message);
+
+      setData((current) => ({
+        ...current,
+        tasks: current.tasks.some((item) => item.id === result.task.id)
+          ? current.tasks.map((item) => (item.id === result.task.id ? result.task : item))
+          : [result.task, ...current.tasks],
+        task_states: {
+          ...current.task_states,
+          [result.task.id]: result.state,
+        },
+        messages: current.messages.map((item) => (item.id === messageId ? result.message : item)),
+        approvals: [result.approval, ...current.approvals],
+        action_logs: [result.log, ...current.action_logs],
+      }));
+      setSelectedProjectId(result.task.project_id);
+      setSelectedTaskId(result.task.id);
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   async function handleCreateContentItem(input: Omit<Parameters<typeof createContentItemInDb>[0], "rules">) {
     setIsSaving(true);
     setLoadError("");
@@ -677,7 +720,15 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         content_items: [result.item, ...current.content_items],
         content_routes: [...result.routes, ...current.content_routes],
         content_schedule: result.schedule ? [result.schedule, ...current.content_schedule] : current.content_schedule,
-        action_logs: [result.log, ...current.action_logs],
+        tasks: result.task ? [result.task, ...current.tasks] : current.tasks,
+        task_states: result.task && result.state
+          ? {
+              ...current.task_states,
+              [result.task.id]: result.state,
+            }
+          : current.task_states,
+        approvals: result.approval ? [result.approval, ...current.approvals] : current.approvals,
+        action_logs: [result.log, ...(result.approvalLog ? [result.approvalLog] : []), ...current.action_logs],
       }));
     } catch (error) {
       setLoadError(getErrorMessage(error));
@@ -742,7 +793,19 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
           schedule.content_item_id === itemId ? { ...schedule, status: result.item.status, updated_at: result.item.updated_at } : schedule,
         ),
         publish_logs: [...result.publishLogs, ...current.publish_logs],
-        action_logs: [result.log, ...current.action_logs],
+        tasks: result.task
+          ? current.tasks.some((task) => task.id === result.task?.id)
+            ? current.tasks.map((task) => (task.id === result.task?.id ? result.task : task))
+            : [result.task, ...current.tasks]
+          : current.tasks,
+        task_states: result.task && result.state
+          ? {
+              ...current.task_states,
+              [result.task.id]: result.state,
+            }
+          : current.task_states,
+        approvals: result.approval ? [result.approval, ...current.approvals] : current.approvals,
+        action_logs: [result.log, ...(result.approvalLog ? [result.approvalLog] : []), ...current.action_logs],
       }));
     } catch (error) {
       setLoadError(getErrorMessage(error));
@@ -1057,16 +1120,36 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     const task = data.tasks.find((item) => item.id === approval.task_id);
     const state = data.task_states[approval.task_id];
     const now = new Date().toISOString();
+    const replyMessageId = approvalTargetId(approval.requested_action, REPLY_APPROVAL_PREFIX);
+    const publishContentId = approvalTargetId(approval.requested_action, PUBLISH_APPROVAL_PREFIX);
+    const message = replyMessageId ? data.messages.find((item) => item.id === replyMessageId) : undefined;
+    const contentItem = publishContentId ? data.content_items.find((item) => item.id === publishContentId) : undefined;
+    const contentRoutes = publishContentId ? data.content_routes.filter((route) => route.content_item_id === publishContentId) : undefined;
 
     if (!task || !state) {
       return;
     }
 
+    const isReplyApproval = Boolean(message);
+    const isPublishApproval = Boolean(contentItem);
     const approvedState: TaskState = {
       ...state,
-      current_stage: "approved for manual publish",
-      completed_steps: Array.from(new Set([...state.completed_steps, "approval granted"])),
-      next_step: "connect Instagram later or publish manually now",
+      current_stage: isReplyApproval
+        ? "reply draft approved"
+        : isPublishApproval
+          ? "content publish approved"
+          : "approved for manual publish",
+      completed_steps: Array.from(
+        new Set([
+          ...state.completed_steps,
+          isReplyApproval ? "reply approval granted" : isPublishApproval ? "publish approval granted" : "approval granted",
+        ]),
+      ),
+      next_step: isReplyApproval
+        ? "send or publish the approved reply from the connected channel"
+        : isPublishApproval
+          ? "external publish connector can execute later, or publish manually now"
+          : "connect Instagram later or publish manually now",
       status: "completed",
       needs_review: false,
       updated_at: now,
@@ -1077,22 +1160,43 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     setLoadError("");
 
     try {
-      await approveActionInDb({ task, state, approval: approvedApproval, updatedState: approvedState });
+      const result = await approveActionInDb({
+        task,
+        state,
+        approval: approvedApproval,
+        updatedState: approvedState,
+        message,
+        contentItem,
+        routes: contentRoutes,
+      });
+      const routeMap = new Map((result.routes ?? []).map((route) => [route.id, route]));
 
       setData((current) => ({
         ...current,
-        tasks: current.tasks.map((item) =>
-          item.id === task.id ? { ...item, status: "completed", updated_at: now } : item,
-        ),
+        tasks: current.tasks.map((item) => (item.id === task.id ? result.task : item)),
         task_states: {
           ...current.task_states,
-          [task.id]: approvedState,
+          [task.id]: result.state,
         },
-        approvals: current.approvals.map((item) => (item.id === approvalId ? approvedApproval : item)),
-        action_logs: [
-          addLocalLog(task.project_id, task.id, "User", "approval.approved", `Approved ${approval.requested_action}.`),
-          ...current.action_logs,
-        ],
+        approvals: current.approvals.map((item) => (item.id === approvalId ? result.approval : item)),
+        messages: result.message
+          ? current.messages.map((item) => (item.id === result.message?.id ? result.message : item))
+          : current.messages,
+        content_items: result.item
+          ? current.content_items.map((item) => (item.id === result.item?.id ? result.item : item))
+          : current.content_items,
+        content_routes: routeMap.size > 0
+          ? current.content_routes.map((route) => routeMap.get(route.id) ?? route)
+          : current.content_routes,
+        content_schedule: result.item
+          ? current.content_schedule.map((schedule) =>
+              schedule.content_item_id === result.item?.id
+                ? { ...schedule, status: result.item.status, updated_at: result.item.updated_at }
+                : schedule,
+            )
+          : current.content_schedule,
+        publish_logs: result.publishLogs ? [...result.publishLogs, ...current.publish_logs] : current.publish_logs,
+        action_logs: [result.log, ...current.action_logs],
       }));
     } catch (error) {
       setLoadError(getErrorMessage(error));
@@ -1718,6 +1822,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         onCreateMessage={handleCreateInboxMessage}
         onCreateTask={handleCreateTaskFromMessage}
         onDraftReply={handleDraftReplyForMessage}
+        onRequestApproval={handleRequestReplyApproval}
         onUpdateStatus={handleUpdateInboxMessageStatus}
       />,
     );
@@ -2154,6 +2259,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
               onCreateMessage={handleCreateInboxMessage}
               onCreateTask={handleCreateTaskFromMessage}
               onDraftReply={handleDraftReplyForMessage}
+              onRequestApproval={handleRequestReplyApproval}
               onUpdateStatus={handleUpdateInboxMessageStatus}
             />
 

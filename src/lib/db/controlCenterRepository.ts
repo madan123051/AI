@@ -52,6 +52,10 @@ type ActionLogRow = Partial<ActionLog> & {
   project_id?: string | null;
 };
 
+type ApprovalRow = Approval & {
+  resolved_at?: string | null;
+};
+
 type HandoffRow = Partial<Omit<HandoffSummary, "handoff_pack">> & {
   id: string;
   task_id: string;
@@ -122,6 +126,8 @@ type WebsiteControlMapRow = WebsiteControlMapEntry & {
 };
 
 const FALLBACK_HANDOFF_MARKER = "\n\nHANDOFF_PACK_JSON:";
+const REPLY_APPROVAL_PREFIX = "reply_comment:";
+const PUBLISH_APPROVAL_PREFIX = "publish_content:";
 
 export function emptyControlCenterData(): ControlCenterData {
   return {
@@ -927,6 +933,55 @@ function localLog(input: Omit<ActionLog, "id" | "created_at"> & { created_at?: s
   };
 }
 
+function localApproval(input: Omit<Approval, "id" | "created_at" | "status"> & { created_at?: string; status?: Approval["status"] }): Approval {
+  return {
+    id: `local-approval-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    status: input.status ?? "pending",
+    created_at: input.created_at ?? new Date().toISOString(),
+    ...input,
+  };
+}
+
+function normalizeApproval(row: ApprovalRow): Approval {
+  return {
+    id: row.id,
+    task_id: row.task_id,
+    title: row.title,
+    requested_action: row.requested_action,
+    reason: row.reason,
+    status: row.status,
+    created_at: row.created_at,
+    resolved_at: row.resolved_at ?? undefined,
+  };
+}
+
+async function insertApproval(
+  supabase: SupabaseClientInstance,
+  input: Omit<Approval, "id" | "created_at" | "status"> & { created_at?: string; status?: Approval["status"] },
+): Promise<Approval | null> {
+  const result = await supabase
+    .from("approvals")
+    .insert({
+      task_id: input.task_id,
+      title: input.title,
+      requested_action: input.requested_action,
+      reason: input.reason,
+      status: input.status ?? "pending",
+      created_at: input.created_at,
+      resolved_at: input.resolved_at ?? null,
+    })
+    .select("*")
+    .single();
+
+  if (isMissingTable(result.error)) {
+    return null;
+  }
+
+  throwUnlessMissingTable("Create approval", result.error);
+
+  return result.data ? normalizeApproval(result.data as ApprovalRow) : null;
+}
+
 async function insertActionLog(
   supabase: SupabaseClientInstance,
   input: Omit<ActionLog, "id" | "created_at"> & { created_at?: string },
@@ -1200,7 +1255,7 @@ export async function loadControlCenterData(): Promise<ControlCenterData> {
     action_logs: isMissingTable(logsResult.error) ? [] : ((logsResult.data ?? []) as ActionLogRow[]).map(normalizeLog),
     handoff_summaries: isMissingTable(handoffsResult.error) ? [] : ((handoffsResult.data ?? []) as HandoffRow[]).map(normalizeHandoff),
     ai_runs: isMissingTable(runsResult.error) ? [] : ((runsResult.data ?? []) as AiRunRow[]).map(normalizeRun),
-    approvals: isMissingTable(approvalsResult.error) ? [] : ((approvalsResult.data ?? []) as Approval[]),
+    approvals: isMissingTable(approvalsResult.error) ? [] : ((approvalsResult.data ?? []) as ApprovalRow[]).map(normalizeApproval),
     connectors: isMissingTable(connectorsResult.error) ? [] : ((connectorsResult.data ?? []) as ConnectorRow[]).map(normalizeConnector),
     website_control_map: websiteControlMap,
     messages: isMissingTable(messagesResult.error) ? [] : ((messagesResult.data ?? []) as MessageRow[]).map(normalizeMessage),
@@ -1666,6 +1721,62 @@ async function createWebsiteReviewTask(input: {
   };
 }
 
+async function createApprovalReviewTask(input: {
+  supabase: SupabaseClientInstance;
+  projectId: string;
+  title: string;
+  goal: string;
+  priority?: Priority;
+  currentStage: string;
+  completedSteps: string[];
+  nextStep: string;
+  lastAi: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}) {
+  const taskResult = await input.supabase
+    .from("tasks")
+    .insert({
+      project_id: input.projectId,
+      title: input.title,
+      goal: input.goal,
+      priority: input.priority ?? "medium",
+      status: "needs_review",
+      created_at: input.createdAt,
+      updated_at: input.createdAt,
+    })
+    .select("*")
+    .single();
+
+  throwIfError("Create approval review task", taskResult.error);
+  const task = normalizeTask(
+    taskResult.data as Task & { priority?: Task["priority"] | null; status?: Task["status"] | null; updated_at?: string | null },
+  );
+  const stateResult = await input.supabase
+    .from("task_states")
+    .insert({
+      task_id: task.id,
+      goal: task.goal,
+      current_stage: input.currentStage,
+      completed_steps: input.completedSteps,
+      next_step: input.nextStep,
+      last_ai: input.lastAi,
+      status: "needs_review",
+      needs_review: true,
+      metadata: input.metadata,
+      updated_at: input.createdAt,
+    })
+    .select("*")
+    .single();
+
+  throwUnlessMissingTable("Create approval task state", stateResult.error);
+
+  return {
+    task,
+    state: stateResult.data ? normalizeTaskState(stateResult.data as TaskState & { metadata?: Record<string, unknown> | null }) : deriveTaskState(task),
+  };
+}
+
 export async function createWebsiteConnectorMessageInDb(input: {
   source?: string;
   type?: string;
@@ -1742,6 +1853,8 @@ export async function createWebsiteConnectorMessageInDb(input: {
     linked_task_created_at: receivedAt,
     linked_task_title: reviewTask.task.title,
     linked_task_status: reviewTask.task.status,
+    reply_approval_status: "pending",
+    reply_approval_requested_at: receivedAt,
   };
   const triagedMessage = await updateMessageWithFallback(
     supabase,
@@ -1788,6 +1901,40 @@ export async function createWebsiteConnectorMessageInDb(input: {
       details: `Summarized website message, suggested ${triage.suggested_priority} priority, drafted reply, and created review task.`,
       created_at: receivedAt,
     });
+  const approval =
+    (await insertApproval(supabase, {
+      task_id: reviewTask.task.id,
+      title: "Approve website reply draft",
+      requested_action: `${REPLY_APPROVAL_PREFIX}${triagedMessage.id}`,
+      reason: `Review the AI suggested reply for ${messageActor(triagedMessage)} before sending or publishing it.`,
+      status: "pending",
+      created_at: receivedAt,
+    })) ??
+    localApproval({
+      task_id: reviewTask.task.id,
+      title: "Approve website reply draft",
+      requested_action: `${REPLY_APPROVAL_PREFIX}${triagedMessage.id}`,
+      reason: `Review the AI suggested reply for ${messageActor(triagedMessage)} before sending or publishing it.`,
+      status: "pending",
+      created_at: receivedAt,
+    });
+  const approvalLog =
+    (await insertActionLog(supabase, {
+      project_id: project.id,
+      task_id: reviewTask.task.id,
+      actor: "Rules Engine",
+      action: "approval.requested",
+      details: `Queued reply approval for ${messageActor(triagedMessage)}.`,
+      created_at: receivedAt,
+    })) ??
+    localLog({
+      project_id: project.id,
+      task_id: reviewTask.task.id,
+      actor: "Rules Engine",
+      action: "approval.requested",
+      details: `Queued reply approval for ${messageActor(triagedMessage)}.`,
+      created_at: receivedAt,
+    });
 
   return {
     project,
@@ -1796,9 +1943,11 @@ export async function createWebsiteConnectorMessageInDb(input: {
     triage,
     task: reviewTask.task,
     taskState: reviewTask.state,
+    approval,
     inboxLog: result.log,
     connectorLog,
     triageLog,
+    approvalLog,
   };
 }
 
@@ -1927,6 +2076,119 @@ export async function draftReplyForMessageInDb(message: Message) {
   return { message: updatedMessage, log };
 }
 
+export async function requestReplyApprovalForMessageInDb(message: Message) {
+  assertSupabaseReady();
+  const supabase = getSupabaseClient();
+  const now = new Date().toISOString();
+  const draftReply =
+    metadataText(message.metadata, "ai_draft_reply") ||
+    `Hi ${message.sender_name || "there"}, thanks for reaching out. I reviewed your message and will follow up with a clear answer shortly.`;
+  let task: Task | undefined;
+  let state: TaskState | undefined;
+
+  if (message.linked_task_id) {
+    const [taskResult, stateResult] = await Promise.all([
+      supabase.from("tasks").select("*").eq("id", message.linked_task_id).single(),
+      supabase.from("task_states").select("*").eq("task_id", message.linked_task_id).single(),
+    ]);
+
+    if (!taskResult.error && taskResult.data) {
+      task = normalizeTask(taskResult.data as Task & { priority?: Task["priority"] | null; status?: Task["status"] | null; updated_at?: string | null });
+    }
+
+    if (!stateResult.error && stateResult.data) {
+      state = normalizeTaskState(stateResult.data as TaskState & { metadata?: Record<string, unknown> | null });
+    }
+  }
+
+  if (!task || !state) {
+    const titleSource = message.subject.trim() || `Message from ${messageActor(message)}`;
+    const reviewTask = await createApprovalReviewTask({
+      supabase,
+      projectId: message.project_id,
+      title: compactText(`Approve reply: ${titleSource}`, 90),
+      goal: [
+        `Approve the AI reply draft for this ${message.source} message before sending or publishing it.`,
+        `Sender: ${message.sender_name}${message.sender_handle ? ` (${message.sender_handle})` : ""}`,
+        message.subject ? `Subject: ${message.subject}` : "",
+        "Suggested reply draft:",
+        draftReply,
+        "Original message:",
+        message.body,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      priority: message.priority,
+      currentStage: "Reply draft prepared, waiting for approval",
+      completedSteps: ["message saved", "reply draft prepared"],
+      nextStep: "Approve reply draft before any external response is sent.",
+      lastAi: "Mock AI",
+      metadata: {
+        source: "inbox_reply_approval",
+        source_message_id: message.id,
+        ai_draft_reply: draftReply,
+      },
+      createdAt: now,
+    });
+
+    task = reviewTask.task;
+    state = reviewTask.state;
+  }
+
+  const metadata = {
+    ...message.metadata,
+    ai_draft_reply: draftReply,
+    ai_draft_status: "needs_review",
+    reply_approval_status: "pending",
+    reply_approval_requested_at: now,
+    reply_approval_task_id: task.id,
+    linked_task_title: task.title,
+  };
+  const updatedMessage = await updateMessageWithFallback(
+    supabase,
+    message,
+    { linked_task_id: task.id, status: "drafted", metadata },
+    { status: "drafted" },
+    "Request reply approval",
+  );
+  const approval =
+    (await insertApproval(supabase, {
+      task_id: task.id,
+      title: "Approve reply draft",
+      requested_action: `${REPLY_APPROVAL_PREFIX}${updatedMessage.id}`,
+      reason: `Review the AI suggested reply for ${messageActor(updatedMessage)} before sending or publishing it.`,
+      status: "pending",
+      created_at: now,
+    })) ??
+    localApproval({
+      task_id: task.id,
+      title: "Approve reply draft",
+      requested_action: `${REPLY_APPROVAL_PREFIX}${updatedMessage.id}`,
+      reason: `Review the AI suggested reply for ${messageActor(updatedMessage)} before sending or publishing it.`,
+      status: "pending",
+      created_at: now,
+    });
+  const log =
+    (await insertActionLog(supabase, {
+      project_id: message.project_id,
+      task_id: task.id,
+      actor: "Rules Engine",
+      action: "approval.requested",
+      details: `Queued reply approval for ${messageActor(updatedMessage)}.`,
+      created_at: now,
+    })) ??
+    localLog({
+      project_id: message.project_id,
+      task_id: task.id,
+      actor: "Rules Engine",
+      action: "approval.requested",
+      details: `Queued reply approval for ${messageActor(updatedMessage)}.`,
+      created_at: now,
+    });
+
+  return { message: updatedMessage, task, state, approval, log };
+}
+
 export async function createContentItemInDb(input: {
   projectId: string;
   title: string;
@@ -2035,7 +2297,26 @@ export async function createContentItemInDb(input: {
       created_at: item.created_at,
     });
 
-  return { item, routes, schedule, log };
+  const approvalResult = publishDecision?.allowed && publishDecision.requiresApproval
+    ? await requestContentPublishApproval({
+        supabase,
+        item,
+        routes,
+        reason: publishDecision.reason,
+        requestedAt: now,
+      })
+    : undefined;
+
+  return {
+    item: approvalResult?.item ?? item,
+    routes,
+    schedule,
+    log,
+    task: approvalResult?.task,
+    state: approvalResult?.state,
+    approval: approvalResult?.approval,
+    approvalLog: approvalResult?.log,
+  };
 }
 
 export async function runContentAiActionInDb(input: {
@@ -2151,6 +2432,122 @@ export async function runContentAiActionInDb(input: {
   return { item, log };
 }
 
+async function requestContentPublishApproval(input: {
+  supabase: SupabaseClientInstance;
+  item: ContentItem;
+  routes: ContentRoute[];
+  reason: string;
+  requestedAt: string;
+}) {
+  let task: Task | undefined;
+  let state: TaskState | undefined;
+
+  if (input.item.task_id) {
+    const [taskResult, stateResult] = await Promise.all([
+      input.supabase.from("tasks").select("*").eq("id", input.item.task_id).single(),
+      input.supabase.from("task_states").select("*").eq("task_id", input.item.task_id).single(),
+    ]);
+
+    if (!taskResult.error && taskResult.data) {
+      task = normalizeTask(taskResult.data as Task & { priority?: Task["priority"] | null; status?: Task["status"] | null; updated_at?: string | null });
+    }
+
+    if (!stateResult.error && stateResult.data) {
+      state = normalizeTaskState(stateResult.data as TaskState & { metadata?: Record<string, unknown> | null });
+    }
+  }
+
+  if (!task || !state) {
+    const routeSummary = input.routes.map((route) => route.route_label || route.target_route).join(", ") || "No routes selected";
+    const reviewTask = await createApprovalReviewTask({
+      supabase: input.supabase,
+      projectId: input.item.project_id,
+      title: compactText(`Approve publish: ${input.item.title}`, 90),
+      goal: [
+        `Approve publishing this ${input.item.content_type} content item before any external publish action.`,
+        `Title: ${input.item.title}`,
+        `Routes: ${routeSummary}`,
+        "Caption/body:",
+        input.item.caption_body,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      priority: "medium",
+      currentStage: "Publish requested, waiting for approval",
+      completedSteps: ["content drafted", "publish requested", "rules engine required review"],
+      nextStep: "Approve publish before external website/social APIs are connected.",
+      lastAi: "Rules Engine",
+      metadata: {
+        source: "content_publish_approval",
+        content_item_id: input.item.id,
+        routes: input.routes.map((route) => route.id),
+      },
+      createdAt: input.requestedAt,
+    });
+
+    task = reviewTask.task;
+    state = reviewTask.state;
+  }
+
+  const metadata = {
+    ...input.item.metadata,
+    publish_approval_status: "pending",
+    publish_approval_requested_at: input.requestedAt,
+    publish_approval_task_id: task.id,
+    rule_decision: input.reason,
+  };
+  const itemResult = await input.supabase
+    .from("content_items")
+    .update({
+      task_id: task.id,
+      status: "approval_required",
+      metadata,
+      updated_at: input.requestedAt,
+    })
+    .eq("id", input.item.id)
+    .select("*")
+    .single();
+
+  throwIfError("Request content publish approval", itemResult.error);
+  const item = normalizeContentItem(itemResult.data as ContentItemRow);
+  const approval =
+    (await insertApproval(input.supabase, {
+      task_id: task.id,
+      title: "Approve content publish",
+      requested_action: `${PUBLISH_APPROVAL_PREFIX}${item.id}`,
+      reason: `Review publishing ${item.title}. ${input.reason}`,
+      status: "pending",
+      created_at: input.requestedAt,
+    })) ??
+    localApproval({
+      task_id: task.id,
+      title: "Approve content publish",
+      requested_action: `${PUBLISH_APPROVAL_PREFIX}${item.id}`,
+      reason: `Review publishing ${item.title}. ${input.reason}`,
+      status: "pending",
+      created_at: input.requestedAt,
+    });
+  const log =
+    (await insertActionLog(input.supabase, {
+      project_id: item.project_id,
+      task_id: task.id,
+      actor: "Rules Engine",
+      action: "approval.requested",
+      details: `Queued publish approval for ${item.title}.`,
+      created_at: input.requestedAt,
+    })) ??
+    localLog({
+      project_id: item.project_id,
+      task_id: task.id,
+      actor: "Rules Engine",
+      action: "approval.requested",
+      details: `Queued publish approval for ${item.title}.`,
+      created_at: input.requestedAt,
+    });
+
+  return { item, task, state, approval, log };
+}
+
 export async function mockPublishContentInDb(input: {
   item: ContentItem;
   routes: ContentRoute[];
@@ -2225,12 +2622,26 @@ export async function mockPublishContentInDb(input: {
       details,
       created_at: now,
     });
+  const updatedItem = normalizeContentItem(itemResult.data as ContentItemRow);
+  const approvalResult = decision.allowed && decision.requiresApproval
+    ? await requestContentPublishApproval({
+        supabase,
+        item: updatedItem,
+        routes: updatedRoutes,
+        reason: decision.reason,
+        requestedAt: now,
+      })
+    : undefined;
 
   return {
-    item: normalizeContentItem(itemResult.data as ContentItemRow),
+    item: approvalResult?.item ?? updatedItem,
     routes: updatedRoutes,
     publishLogs: ((publishResult.data ?? []) as PublishLogRow[]).map(normalizePublishLog),
     log: actionLog,
+    task: approvalResult?.task,
+    state: approvalResult?.state,
+    approval: approvalResult?.approval,
+    approvalLog: approvalResult?.log,
   };
 }
 
@@ -2695,30 +3106,165 @@ export async function persistTaskTransition(input: {
   };
 }
 
-export async function approveActionInDb(input: { task: Task; state: TaskState; approval: Approval; updatedState: TaskState }) {
+export async function approveActionInDb(input: {
+  task: Task;
+  state: TaskState;
+  approval: Approval;
+  updatedState: TaskState;
+  message?: Message;
+  contentItem?: ContentItem;
+  routes?: ContentRoute[];
+}) {
   assertSupabaseReady();
   const supabase = getSupabaseClient();
+  const resolvedAt = input.approval.resolved_at ?? new Date().toISOString();
 
   const [taskResult, stateResult, approvalResult] = await Promise.all([
-    supabase.from("tasks").update({ status: input.updatedState.status }).eq("id", input.task.id),
-    supabase.from("task_states").upsert(taskStatePayload(input.updatedState), { onConflict: "task_id" }),
+    supabase
+      .from("tasks")
+      .update({ status: input.updatedState.status, updated_at: input.updatedState.updated_at })
+      .eq("id", input.task.id)
+      .select("*")
+      .single(),
+    supabase
+      .from("task_states")
+      .upsert(taskStatePayload(input.updatedState), { onConflict: "task_id" })
+      .select("*")
+      .single(),
     supabase
       .from("approvals")
-      .update({ status: "approved", resolved_at: input.approval.resolved_at ?? new Date().toISOString() })
-      .eq("id", input.approval.id),
+      .update({ status: "approved", resolved_at: resolvedAt })
+      .eq("id", input.approval.id)
+      .select("*")
+      .single(),
   ]);
 
   throwIfError("Approve task update", taskResult.error);
   throwUnlessMissingTable("Approve state update", stateResult.error);
   throwUnlessMissingTable("Approve approval update", approvalResult.error);
 
-  await insertActionLog(supabase, {
-    project_id: input.task.project_id,
-    task_id: input.task.id,
-    actor: "User",
-    action: "approval.approved",
-    details: `Approved ${input.approval.requested_action}.`,
-  });
+  const approvedTask = taskResult.data
+    ? normalizeTask(taskResult.data as Task & { priority?: Task["priority"] | null; status?: Task["status"] | null; updated_at?: string | null })
+    : { ...input.task, status: input.updatedState.status, updated_at: input.updatedState.updated_at };
+  const approvedState = stateResult.data ? normalizeTaskState(stateResult.data as TaskState) : input.updatedState;
+  const approvedApproval = approvalResult.data
+    ? normalizeApproval(approvalResult.data as ApprovalRow)
+    : { ...input.approval, status: "approved" as const, resolved_at: resolvedAt };
+
+  let message: Message | undefined;
+
+  if (input.message) {
+    const metadata = {
+      ...input.message.metadata,
+      ai_draft_status: "approved",
+      reply_approval_status: "approved",
+      reply_approval_id: approvedApproval.id,
+      reply_approved_at: resolvedAt,
+    };
+
+    message = await updateMessageWithFallback(
+      supabase,
+      input.message,
+      { status: "replied", metadata },
+      { status: "closed" },
+      "Approve reply draft",
+    );
+  }
+
+  let item: ContentItem | undefined;
+  let routes = input.routes ?? [];
+  let publishLogs: PublishLog[] = [];
+
+  if (input.contentItem) {
+    const itemMetadata = {
+      ...input.contentItem.metadata,
+      publish_approval_status: "approved",
+      publish_approval_id: approvedApproval.id,
+      publish_approved_at: resolvedAt,
+    };
+    const itemResult = await supabase
+      .from("content_items")
+      .update({ status: "published", metadata: itemMetadata, updated_at: resolvedAt })
+      .eq("id", input.contentItem.id)
+      .select("*")
+      .single();
+
+    throwIfError("Approve content publish item", itemResult.error);
+    item = normalizeContentItem(itemResult.data as ContentItemRow);
+
+    if (routes.length === 0) {
+      const routesResult = await supabase.from("content_routes").select("*").eq("content_item_id", input.contentItem.id);
+
+      throwIfError("Load content routes for approval", routesResult.error);
+      routes = ((routesResult.data ?? []) as ContentRouteRow[]).map(normalizeContentRoute);
+    }
+
+    if (routes.length > 0) {
+      const routeResult = await supabase
+        .from("content_routes")
+        .update({ status: "published" })
+        .in("id", routes.map((route) => route.id))
+        .select("*");
+
+      throwIfError("Approve content publish routes", routeResult.error);
+      routes = ((routeResult.data ?? []) as ContentRouteRow[]).map(normalizeContentRoute);
+    }
+
+    const scheduleResult = await supabase
+      .from("content_schedule")
+      .update({ status: "published", updated_at: resolvedAt })
+      .eq("content_item_id", input.contentItem.id);
+
+    throwUnlessMissingTable("Approve content schedule", scheduleResult.error);
+
+    const publishRows = (routes.length > 0 ? routes : [{ id: null }]).map((route) => ({
+      project_id: input.contentItem?.project_id,
+      content_item_id: input.contentItem?.id,
+      route_id: route.id,
+      action: "mock_publish_approved",
+      status: "published",
+      details: `Approved publish request for ${input.contentItem?.title}. External APIs are still manual/future connectors.`,
+      created_at: resolvedAt,
+    }));
+    const publishResult = await supabase.from("publish_logs").insert(publishRows).select("*");
+
+    throwIfError("Create approved publish logs", publishResult.error);
+    publishLogs = ((publishResult.data ?? []) as PublishLogRow[]).map(normalizePublishLog);
+  }
+
+  const approvalDetail = input.message
+    ? `Approved reply draft for ${messageActor(input.message)}.`
+    : input.contentItem
+      ? `Approved publish request for ${input.contentItem.title}.`
+      : `Approved ${input.approval.requested_action}.`;
+  const log =
+    (await insertActionLog(supabase, {
+      project_id: input.task.project_id,
+      task_id: input.task.id,
+      actor: "User",
+      action: "approval.approved",
+      details: approvalDetail,
+      created_at: resolvedAt,
+    })) ??
+    localLog({
+      project_id: input.task.project_id,
+      task_id: input.task.id,
+      actor: "User",
+      action: "approval.approved",
+      details: approvalDetail,
+      created_at: resolvedAt,
+    });
+
+  return {
+    task: approvedTask,
+    state: approvedState,
+    approval: approvedApproval,
+    message,
+    item,
+    routes,
+    publishLogs,
+    log,
+  };
 }
 
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, type FormEvent } from "react";
-import { Archive, BrainCircuit, Check, Inbox, Link2, ListPlus, MailPlus, WandSparkles } from "lucide-react";
+import { Archive, BrainCircuit, Check, Inbox, Link2, ListPlus, MailPlus, ShieldCheck, WandSparkles } from "lucide-react";
 import type { Message, MessageSource, MessageStatus, Priority, Project } from "@/lib/types";
 
 type CreateMessageInput = {
@@ -21,6 +21,7 @@ type InboxPanelProps = {
   onCreateMessage: (input: CreateMessageInput) => Promise<void> | void;
   onCreateTask: (messageId: string) => Promise<void> | void;
   onDraftReply: (messageId: string) => Promise<void> | void;
+  onRequestApproval: (messageId: string) => Promise<void> | void;
   onUpdateStatus: (messageId: string, status: MessageStatus) => Promise<void> | void;
 };
 
@@ -96,6 +97,7 @@ export function InboxPanel({
   onCreateMessage,
   onCreateTask,
   onDraftReply,
+  onRequestApproval,
   onUpdateStatus,
 }: InboxPanelProps) {
   const [source, setSource] = useState<MessageSource>("gmail");
@@ -238,6 +240,9 @@ export function InboxPanel({
           const suggestedPriority = metadataPriority(message);
           const triageReasons = metadataStringArray(message, "ai_triage_reasons");
           const linkedTaskTitle = metadataString(message, "linked_task_title");
+          const replyApprovalStatus = metadataString(message, "reply_approval_status");
+          const isReplyApprovalPending = replyApprovalStatus === "pending";
+          const isReplyApproved = replyApprovalStatus === "approved" || message.status === "replied";
 
           return (
             <article key={message.id} className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
@@ -311,9 +316,16 @@ export function InboxPanel({
 
               {draftReply ? (
                 <div className="mt-3 rounded-lg border border-sky-300/30 bg-sky-300/10 p-3">
-                  <div className="mb-2 flex items-center gap-2">
-                    <WandSparkles className="h-4 w-4 text-sky-200" aria-hidden="true" />
-                    <h4 className="text-sm font-semibold text-sky-50">Suggested Reply Draft</h4>
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <div className="inline-flex items-center gap-2">
+                      <WandSparkles className="h-4 w-4 text-sky-200" aria-hidden="true" />
+                      <h4 className="text-sm font-semibold text-sky-50">Suggested Reply Draft</h4>
+                    </div>
+                    {replyApprovalStatus ? (
+                      <span className={`rounded-lg border px-2 py-1 text-xs font-medium ${isReplyApproved ? "border-emerald-300/40 bg-emerald-300/10 text-emerald-100" : "border-amber-300/40 bg-amber-300/10 text-amber-100"}`}>
+                        {isReplyApproved ? "Approved" : "Approval Pending"}
+                      </span>
+                    ) : null}
                   </div>
                   <p className="whitespace-pre-line break-words text-sm leading-6 text-sky-50">{draftReply}</p>
                 </div>
@@ -340,6 +352,18 @@ export function InboxPanel({
                   <WandSparkles className="h-4 w-4" aria-hidden="true" />
                   Draft Reply
                 </button>
+                {draftReply ? (
+                  <button
+                    type="button"
+                    onClick={() => void onRequestApproval(message.id)}
+                    disabled={isSaving || isReplyApprovalPending || isReplyApproved}
+                    className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-zinc-700 px-3 text-sm font-medium text-zinc-100 transition hover:border-amber-300 hover:text-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
+                    title="Send reply draft to approval queue"
+                  >
+                    <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                    {isReplyApproved ? "Reply Approved" : isReplyApprovalPending ? "Approval Pending" : "Request Approval"}
+                  </button>
+                ) : null}
                 {message.status === "unread" ? (
                   <button
                     type="button"

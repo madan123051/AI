@@ -355,10 +355,10 @@ export function ContentCalendarPanel({
                     onClick={() => void onMockPublish(item.id)}
                     disabled={isSaving}
                     className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-zinc-700 px-3 text-sm font-medium text-zinc-100 transition hover:border-amber-300 hover:text-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
-                    title="Mock publish with review rule"
+                    title="Request publish approval with the review rule"
                   >
                     <Play className="h-4 w-4" aria-hidden="true" />
-                    Mock Publish
+                    Request Publish
                   </button>
                   <button
                     type="button"
