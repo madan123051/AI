@@ -20,6 +20,10 @@ function textField(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 function configuredSecret() {
   return process.env.WEBSITE_CONNECTOR_SECRET ?? process.env.CONNECTOR_WEBHOOK_SECRET ?? "";
 }
@@ -80,7 +84,7 @@ export async function POST(request: Request) {
       subject: textField(payload.subject),
       body,
       metadata: payload.metadata,
-      defaultProjectId: process.env.WEBSITE_CONNECTOR_PROJECT_ID,
+      defaultProjectId: isUuid(process.env.WEBSITE_CONNECTOR_PROJECT_ID ?? "") ? process.env.WEBSITE_CONNECTOR_PROJECT_ID : undefined,
     });
 
     return NextResponse.json(
