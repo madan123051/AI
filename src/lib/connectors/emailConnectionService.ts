@@ -73,8 +73,9 @@ function emailPassword() {
 
 function resolveConfig(input: EmailConnectorTestConfig): ResolvedEmailConfig {
   const provider = providerValue(input.provider);
-  const emailAddress = textValue(input.email_address) || process.env.EMAIL_CONNECTOR_ADDRESS || "";
-  const username = process.env.EMAIL_CONNECTOR_USERNAME || textValue(input.username) || emailAddress;
+  const configuredEmailAddress = textValue(input.email_address) || process.env.EMAIL_CONNECTOR_ADDRESS || "";
+  const username = process.env.EMAIL_CONNECTOR_USERNAME || textValue(input.username) || configuredEmailAddress;
+  const emailAddress = configuredEmailAddress || (username.includes("@") ? username : "");
 
   return {
     provider,
