@@ -1,10 +1,12 @@
 "use client";
 
+import { useMemo } from "react";
 import { AlertTriangle, Check, Clock3, ShieldAlert } from "lucide-react";
-import type { Approval } from "@/lib/types";
+import type { Approval, Message } from "@/lib/types";
 
 interface ApprovalQueueProps {
   approvals: Approval[];
+  messages?: Message[];
   onApprove: (approvalId: string) => void;
 }
 
@@ -31,6 +33,22 @@ function executionStatusClass(status: Approval["execution_status"]) {
   return "border-amber-300/40 bg-amber-300/10 text-amber-100";
 }
 
+function approvalCardClass(status: Approval["execution_status"]) {
+  if (status === "executed") {
+    return "border-emerald-400/30 bg-emerald-400/10";
+  }
+
+  if (status === "failed") {
+    return "border-rose-400/30 bg-rose-400/10";
+  }
+
+  if (status === "execution_pending" || status === "executing") {
+    return "border-sky-400/30 bg-sky-400/10";
+  }
+
+  return "border-amber-400/30 bg-amber-400/10";
+}
+
 function actionSummary(approval: Approval) {
   if (approval.action_type === "reply_comment") {
     return "Reply to the selected comment through the connector.";
@@ -51,30 +69,107 @@ function actionSummary(approval: Approval) {
   return "Update the selected live content through the connector.";
 }
 
-export function ApprovalQueue({ approvals, onApprove }: ApprovalQueueProps) {
+function metadataText(record: Record<string, unknown> | undefined, key: string) {
+  const value = record?.[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function executionMetadata(approval: Approval) {
+  const result = approval.metadata.execution_result;
+
+  if (!result || typeof result !== "object") {
+    return undefined;
+  }
+
+  const metadata = (result as { metadata?: unknown }).metadata;
+
+  return metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : undefined;
+}
+
+function firstMetadataText(records: Array<Record<string, unknown> | undefined>, keys: string[]) {
+  for (const record of records) {
+    for (const key of keys) {
+      const value = metadataText(record, key);
+
+      if (value) {
+        return value;
+      }
+    }
+  }
+
+  return "";
+}
+
+function requestedActionTargetId(approval: Approval) {
+  const separatorIndex = approval.requested_action.indexOf(":");
+
+  return separatorIndex >= 0 ? approval.requested_action.slice(separatorIndex + 1).trim() : "";
+}
+
+function approvalMessageId(approval: Approval) {
+  return metadataText(approval.metadata, "message_id") || approval.target_id || requestedActionTargetId(approval);
+}
+
+function isPendingReview(approval: Approval) {
+  return approval.status === "pending" && (approval.execution_status === "pending_review" || approval.execution_status === "executing");
+}
+
+function needsAttention(approval: Approval) {
+  return approval.execution_status === "failed" || approval.execution_status === "execution_pending";
+}
+
+export function ApprovalQueue({ approvals, messages = [], onApprove }: ApprovalQueueProps) {
+  const sortedApprovals = useMemo(
+    () =>
+      approvals
+        .slice()
+        .sort((first, second) =>
+          (second.resolved_at ?? second.created_at).localeCompare(first.resolved_at ?? first.created_at),
+        ),
+    [approvals],
+  );
+  const messagesById = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages]);
+  const pendingCount = sortedApprovals.filter(isPendingReview).length;
+  const attentionCount = sortedApprovals.filter(needsAttention).length;
+  const executedCount = sortedApprovals.filter((approval) => approval.execution_status === "executed").length;
+
   return (
     <section className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-4">
       <div className="mb-4 flex items-center justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold uppercase tracking-normal text-zinc-400">Approvals</h2>
-          <p className="mt-1 text-lg font-semibold text-zinc-50">{approvals.length} active</p>
+          <p className="mt-1 text-lg font-semibold text-zinc-50">{pendingCount} pending review</p>
+          <p className="mt-1 text-xs text-zinc-500">
+            {attentionCount} need attention · {executedCount} executed in history
+          </p>
         </div>
         <ShieldAlert className="h-5 w-5 text-amber-300" aria-hidden="true" />
       </div>
 
       <div className="space-y-3">
-        {approvals.length === 0 ? (
-          <p className="text-sm text-zinc-500">Approval queue is clear.</p>
+        {sortedApprovals.length === 0 ? (
+          <p className="text-sm text-zinc-500">No approval activity yet.</p>
         ) : (
-          approvals.map((approval) => {
+          sortedApprovals.map((approval) => {
             const canApprove = approval.status === "pending" && approval.execution_status === "pending_review";
+            const message = messagesById.get(approvalMessageId(approval));
+            const metadataRecords = [approval.metadata, message?.metadata, executionMetadata(approval)];
+            const commentDocId = firstMetadataText(metadataRecords, [
+              "original_comment_id",
+              "comment_doc_id",
+              "docId",
+              "firestore_original_comment_doc_id",
+            ]);
+            const targetType = firstMetadataText(metadataRecords, ["targetType", "target_type", "comment_target_type"]);
+            const targetId = firstMetadataText(metadataRecords, ["targetId", "target_id", "comment_target_id"]);
+            const replyDocId = firstMetadataText(metadataRecords, ["firestore_reply_doc_id"]);
 
             return (
-            <article key={approval.id} className="rounded-md border border-amber-400/30 bg-amber-400/10 p-3">
+            <article key={approval.id} className={`rounded-md border p-3 ${approvalCardClass(approval.execution_status)}`}>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-sm font-semibold text-amber-100">{approval.title}</h3>
+                    <h3 className="text-sm font-semibold text-zinc-50">{approval.title}</h3>
                     <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${executionStatusClass(approval.execution_status)}`}>
                       {label(approval.execution_status)}
                     </span>
@@ -82,14 +177,30 @@ export function ApprovalQueue({ approvals, onApprove }: ApprovalQueueProps) {
                       {approval.action_type}
                     </span>
                   </div>
-                  <p className="mt-2 break-words text-sm leading-6 text-amber-100/80">{approval.reason}</p>
-                  <div className="mt-3 grid gap-2 text-sm leading-6 text-amber-50/90">
+                  <p className="mt-2 break-words text-sm leading-6 text-zinc-300">{approval.reason}</p>
+                  <div className="mt-3 grid gap-2 text-sm leading-6 text-zinc-100">
                     <p>
                       <span className="font-semibold text-amber-100">After approval:</span> {actionSummary(approval)}
                     </p>
                     <p>
                       <span className="font-semibold text-amber-100">Target:</span> {label(approval.connector)} / {approval.target_type || "target"} {approval.target_id ? `(${approval.target_id})` : ""}
                     </p>
+                    {message ? (
+                      <p>
+                        <span className="font-semibold text-amber-100">Inbox status:</span> {label(message.status)}
+                      </p>
+                    ) : null}
+                    {commentDocId || targetType || targetId ? (
+                      <p>
+                        <span className="font-semibold text-amber-100">Website context:</span>{" "}
+                        {targetType || "target"} {targetId ? `/${targetId}` : ""} {commentDocId ? `· comment ${commentDocId}` : ""}
+                      </p>
+                    ) : null}
+                    {replyDocId ? (
+                      <p>
+                        <span className="font-semibold text-emerald-100">Executed reply:</span> comments/{replyDocId}
+                      </p>
+                    ) : null}
                     {approval.draft_text ? (
                       <div className="rounded-lg border border-amber-300/20 bg-zinc-950/40 p-3">
                         <p className="text-xs font-semibold uppercase tracking-normal text-amber-100/80">Draft</p>
@@ -100,6 +211,12 @@ export function ApprovalQueue({ approvals, onApprove }: ApprovalQueueProps) {
                       <div className="flex gap-2 rounded-lg border border-amber-300/40 bg-amber-300/10 p-3 text-amber-100">
                         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                         <p>Approved, but actual connector reply/send is not implemented yet.</p>
+                      </div>
+                    ) : null}
+                    {approval.execution_status === "failed" ? (
+                      <div className="flex gap-2 rounded-lg border border-rose-300/30 bg-rose-300/10 p-3 text-rose-100">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                        <p>This is a failed execution attempt saved in history. If a newer approval succeeded, the reply can still appear on the website.</p>
                       </div>
                     ) : null}
                     {approval.execution_error ? (

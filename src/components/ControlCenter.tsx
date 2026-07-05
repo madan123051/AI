@@ -321,10 +321,15 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     () =>
       data.approvals.filter(
         (approval) =>
-          approval.status === "pending" ||
-          approval.execution_status === "executing" ||
-          approval.execution_status === "execution_pending" ||
-          approval.execution_status === "failed",
+          approval.status === "pending" &&
+          (approval.execution_status === "pending_review" || approval.execution_status === "executing"),
+      ),
+    [data.approvals],
+  );
+  const approvalAttentionItems = useMemo(
+    () =>
+      data.approvals.filter(
+        (approval) => approval.execution_status === "execution_pending" || approval.execution_status === "failed",
       ),
     [data.approvals],
   );
@@ -412,9 +417,9 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
               }
             },
           })),
-        ...pendingApprovals.slice(0, 2).map((approval) => ({
+        ...[...pendingApprovals, ...approvalAttentionItems].slice(0, 2).map((approval) => ({
           id: `approval-${approval.id}`,
-          title: "Action needs review",
+          title: approval.execution_status === "failed" ? "Connector action failed" : "Action needs review",
           detail: approval.reason,
           created_at: approval.created_at,
           tone: "amber" as const,
@@ -453,7 +458,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         .slice()
         .sort((first, second) => second.created_at.localeCompare(first.created_at))
         .slice(0, 6),
-    [contentItemsById, data.handoff_summaries, data.messages, pendingApprovals, sortedSchedules, taskById, tomorrowKey],
+    [approvalAttentionItems, contentItemsById, data.handoff_summaries, data.messages, pendingApprovals, sortedSchedules, taskById, tomorrowKey],
   );
   const visibleNotifications = useMemo<DashboardNotification[]>(
     () =>
@@ -2010,7 +2015,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
   }
 
   if (view === "approvals") {
-    return renderShell(<ApprovalQueue approvals={pendingApprovals} onApprove={(approvalId) => void handleApprove(approvalId)} />);
+    return renderShell(<ApprovalQueue approvals={data.approvals} messages={data.messages} onApprove={(approvalId) => void handleApprove(approvalId)} />);
   }
 
   if (view === "memory") {
@@ -2450,7 +2455,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
               isSaving={isSaving}
               onGenerate={() => void handleGenerateHandoff()}
             />
-            <ApprovalQueue approvals={pendingApprovals} onApprove={(approvalId) => void handleApprove(approvalId)} />
+            <ApprovalQueue approvals={data.approvals} messages={data.messages} onApprove={(approvalId) => void handleApprove(approvalId)} />
           </aside>
         </section>
       </main>
