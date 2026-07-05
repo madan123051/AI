@@ -1,13 +1,14 @@
 "use client";
 
-import { useMemo } from "react";
-import { AlertTriangle, Check, Clock3, ShieldAlert } from "lucide-react";
+import { useMemo, useState } from "react";
+import { AlertTriangle, Check, Clock3, Pencil, Save, ShieldAlert } from "lucide-react";
 import type { Approval, Message } from "@/lib/types";
 
 interface ApprovalQueueProps {
   approvals: Approval[];
   messages?: Message[];
-  onApprove: (approvalId: string) => void;
+  onApprove: (approvalId: string, draftText?: string) => void;
+  onSaveDraft?: (approvalId: string, draftText: string) => void;
 }
 
 function label(value: string) {
@@ -118,7 +119,8 @@ function needsAttention(approval: Approval) {
   return approval.execution_status === "failed" || approval.execution_status === "execution_pending";
 }
 
-export function ApprovalQueue({ approvals, messages = [], onApprove }: ApprovalQueueProps) {
+export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft }: ApprovalQueueProps) {
+  const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
   const sortedApprovals = useMemo(
     () =>
       approvals
@@ -152,7 +154,11 @@ export function ApprovalQueue({ approvals, messages = [], onApprove }: ApprovalQ
         ) : (
           sortedApprovals.map((approval) => {
             const canApprove = approval.status === "pending" && approval.execution_status === "pending_review";
+            const canEditDraft = canApprove && Boolean(onSaveDraft);
             const message = messagesById.get(approvalMessageId(approval));
+            const draftValue = draftEdits[approval.id] ?? approval.draft_text;
+            const draftDirty = draftValue.trim() !== approval.draft_text.trim();
+            const hasDraftText = draftValue.trim().length > 0;
             const metadataRecords = [approval.metadata, message?.metadata, executionMetadata(approval)];
             const commentDocId = firstMetadataText(metadataRecords, [
               "original_comment_id",
@@ -201,10 +207,43 @@ export function ApprovalQueue({ approvals, messages = [], onApprove }: ApprovalQ
                         <span className="font-semibold text-emerald-100">Executed reply:</span> comments/{replyDocId}
                       </p>
                     ) : null}
-                    {approval.draft_text ? (
+                    {approval.draft_text || canEditDraft ? (
                       <div className="rounded-lg border border-amber-300/20 bg-zinc-950/40 p-3">
-                        <p className="text-xs font-semibold uppercase tracking-normal text-amber-100/80">Draft</p>
-                        <p className="mt-1 whitespace-pre-line break-words text-sm text-amber-50">{approval.draft_text}</p>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs font-semibold uppercase tracking-normal text-amber-100/80">Draft</p>
+                          {canEditDraft ? (
+                            <span className="inline-flex items-center gap-1 text-xs text-amber-100/70">
+                              <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                              Editable before approval
+                            </span>
+                          ) : null}
+                        </div>
+                        {canEditDraft ? (
+                          <>
+                            <textarea
+                              value={draftValue}
+                              onChange={(event) =>
+                                setDraftEdits((current) => ({
+                                  ...current,
+                                  [approval.id]: event.target.value,
+                                }))
+                              }
+                              className="mt-2 min-h-32 w-full resize-y rounded-lg border border-amber-300/20 bg-zinc-950 px-3 py-2 text-sm leading-6 text-amber-50 outline-none transition focus:border-amber-200"
+                              aria-label="Edit reply draft"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => onSaveDraft?.(approval.id, draftValue)}
+                              disabled={!draftDirty || !hasDraftText}
+                              className="mt-3 inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-amber-300/40 px-3 text-sm font-medium text-amber-100 transition hover:border-amber-200 hover:text-amber-50 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <Save className="h-4 w-4" aria-hidden="true" />
+                              Save Draft
+                            </button>
+                          </>
+                        ) : (
+                          <p className="mt-1 whitespace-pre-line break-words text-sm text-amber-50">{approval.draft_text}</p>
+                        )}
                       </div>
                     ) : null}
                     {approval.execution_status === "execution_pending" ? (
@@ -229,13 +268,13 @@ export function ApprovalQueue({ approvals, messages = [], onApprove }: ApprovalQ
                 </div>
                 <button
                   type="button"
-                  onClick={() => onApprove(approval.id)}
-                  disabled={!canApprove}
+                  onClick={() => onApprove(approval.id, draftDirty ? draftValue : undefined)}
+                  disabled={!canApprove || (draftDirty && !hasDraftText)}
                   className="inline-flex min-h-9 shrink-0 items-center justify-center gap-2 rounded-lg bg-amber-300 px-3 text-sm font-semibold text-zinc-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
                   title="Approve action"
                 >
                   {canApprove ? <Check className="h-4 w-4" aria-hidden="true" /> : <Clock3 className="h-4 w-4" aria-hidden="true" />}
-                  {canApprove ? "Approve" : label(approval.execution_status)}
+                  {canApprove ? (draftDirty ? "Save & Approve" : "Approve") : label(approval.execution_status)}
                 </button>
               </div>
             </article>

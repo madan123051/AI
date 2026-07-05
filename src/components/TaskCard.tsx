@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, Clock3, ListChecks, Play, RefreshCw } from "lucide-react";
+import { CheckCircle2, Clock3, History, ListChecks, Play, RefreshCw, Trash2 } from "lucide-react";
 import type { Task, TaskState } from "@/lib/types";
 
 const statusStyles = {
@@ -18,9 +18,11 @@ interface TaskCardProps {
   onSelect: () => void;
   onStart: () => void;
   onContinue: () => void;
+  onClearHistory?: () => void;
+  onDelete?: () => void;
 }
 
-export function TaskCard({ task, state, selected, onSelect, onStart, onContinue }: TaskCardProps) {
+export function TaskCard({ task, state, selected, onSelect, onStart, onContinue, onClearHistory, onDelete }: TaskCardProps) {
   const canStart = state.status === "queued";
   const canContinue = state.status === "in_progress";
 
@@ -44,7 +46,7 @@ export function TaskCard({ task, state, selected, onSelect, onStart, onContinue 
           <p className="mt-1 text-sm leading-6 text-zinc-400">{task.goal}</p>
         </button>
 
-        <div className="flex shrink-0 gap-2">
+        <div className="flex shrink-0 flex-wrap gap-2">
           <button
             type="button"
             onClick={onStart}
@@ -65,6 +67,28 @@ export function TaskCard({ task, state, selected, onSelect, onStart, onContinue 
             <RefreshCw className="h-4 w-4" aria-hidden="true" />
             Switch AI
           </button>
+          {onClearHistory ? (
+            <button
+              type="button"
+              onClick={onClearHistory}
+              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-zinc-700 px-3 text-sm font-medium text-zinc-100 transition hover:border-amber-300 hover:text-amber-200"
+              title="Clear task action and AI history"
+            >
+              <History className="h-4 w-4" aria-hidden="true" />
+              History
+            </button>
+          ) : null}
+          {onDelete ? (
+            <button
+              type="button"
+              onClick={onDelete}
+              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-rose-500/50 px-3 text-sm font-medium text-rose-100 transition hover:border-rose-300 hover:text-rose-50"
+              title="Delete task"
+            >
+              <Trash2 className="h-4 w-4" aria-hidden="true" />
+              Delete
+            </button>
+          ) : null}
         </div>
       </div>
 

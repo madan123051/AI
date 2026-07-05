@@ -991,11 +991,12 @@ function normalizeHandoff(row: HandoffRow): HandoffSummary {
 }
 
 
-function localLog(input: Omit<ActionLog, "id" | "created_at"> & { created_at?: string }): ActionLog {
+function localLog(input: Omit<ActionLog, "id" | "created_at" | "project_id"> & { project_id?: string; created_at?: string }): ActionLog {
   return {
     id: `local-log-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
     created_at: input.created_at ?? new Date().toISOString(),
     ...input,
+    project_id: input.project_id ?? "legacy-action-logs",
   };
 }
 
@@ -1175,12 +1176,12 @@ async function insertApproval(
 
 async function insertActionLog(
   supabase: SupabaseClientInstance,
-  input: Omit<ActionLog, "id" | "created_at"> & { created_at?: string },
+  input: Omit<ActionLog, "id" | "created_at" | "project_id"> & { project_id?: string; created_at?: string },
 ): Promise<ActionLog | null> {
   const fullResult = await supabase
     .from("action_logs")
     .insert({
-      project_id: input.project_id,
+      project_id: input.project_id ?? null,
       task_id: input.task_id ?? null,
       actor: input.actor,
       action: input.action,
@@ -1221,6 +1222,88 @@ async function insertActionLog(
 
   throwIfError("Create fallback action log", fallbackResult.error);
   return null;
+}
+
+export async function updateApprovalDraftInDb(approval: Approval, draftText: string, message?: Message) {
+  assertSupabaseReady();
+  const supabase = getSupabaseClient();
+  const now = new Date().toISOString();
+  const trimmedDraft = draftText.trim();
+
+  if (!trimmedDraft) {
+    throw new Error("Reply draft cannot be empty.");
+  }
+
+  if (approval.status !== "pending" || approval.execution_status !== "pending_review") {
+    throw new Error("Only pending approval drafts can be edited.");
+  }
+
+  const metadata = {
+    ...approval.metadata,
+    draft_edited_at: now,
+    draft_edited_by: "User",
+    manual_draft: true,
+  };
+  const approvalResult = await supabase
+    .from("approvals")
+    .update({
+      draft_text: trimmedDraft,
+      metadata,
+    })
+    .eq("id", approval.id)
+    .select("*")
+    .single();
+
+  approvalExecutionSchemaError("Update approval draft", approvalResult.error);
+  throwUnlessMissingTable("Update approval draft", approvalResult.error);
+
+  const updatedApproval = approvalResult.data
+    ? normalizeApproval(approvalResult.data as ApprovalRow)
+    : {
+        ...approval,
+        draft_text: trimmedDraft,
+        metadata,
+      };
+
+  let updatedMessage: Message | undefined;
+
+  if (message) {
+    updatedMessage = await updateMessageWithFallback(
+      supabase,
+      message,
+      {
+        metadata: {
+          ...message.metadata,
+          ai_draft_reply: trimmedDraft,
+          ai_draft_status: "edited",
+          ai_draft_edited_at: now,
+          reply_approval_id: approval.id,
+        },
+      },
+      {},
+      "Update approval message draft",
+    );
+  }
+
+  const log =
+    (await insertActionLog(supabase, {
+      project_id: message?.project_id,
+      task_id: approval.task_id,
+      actor: "User",
+      action: "approval.draft_updated",
+      details: `Updated reply draft for ${approval.title}.`,
+      created_at: now,
+    })) ??
+    localLog({
+      project_id: message?.project_id,
+      task_id: approval.task_id,
+      actor: "User",
+      action: "approval.draft_updated",
+      details: `Updated reply draft for ${approval.title}.`,
+      created_at: now,
+    });
+
+  return { approval: updatedApproval, message: updatedMessage, log };
 }
 
 async function insertAiRun(supabase: SupabaseClientInstance, run: AiRun): Promise<AiRun | null> {
@@ -1568,6 +1651,128 @@ export async function createTaskInDb(input: { projectId: string; title: string; 
   return {
     task,
     state: stateResult.data ? normalizeTaskState(stateResult.data as TaskState) : deriveTaskState(task),
+    log,
+  };
+}
+
+export async function deleteTaskHistoryInDb(task: Task) {
+  assertSupabaseReady();
+  const supabase = getSupabaseClient();
+  const now = new Date().toISOString();
+
+  await deleteEq(supabase, "action_logs", "task_id", task.id, "Delete task action logs");
+  await deleteEq(supabase, "ai_runs", "task_id", task.id, "Delete task AI runs");
+  await deleteEq(supabase, "handoff_summaries", "task_id", task.id, "Delete task handoff history");
+
+  const log =
+    (await insertActionLog(supabase, {
+      project_id: task.project_id,
+      task_id: task.id,
+      actor: "User",
+      action: "task.history_cleared",
+      details: `Cleared history for task: ${task.title}.`,
+      created_at: now,
+    })) ??
+    localLog({
+      project_id: task.project_id,
+      task_id: task.id,
+      actor: "User",
+      action: "task.history_cleared",
+      details: `Cleared history for task: ${task.title}.`,
+      created_at: now,
+    });
+
+  return { taskId: task.id, log };
+}
+
+export async function deleteProjectTaskHistoryInDb(project: Project, tasks: Task[]) {
+  assertSupabaseReady();
+  const supabase = getSupabaseClient();
+  const taskIds = tasks.filter((task) => task.project_id === project.id).map((task) => task.id);
+  const now = new Date().toISOString();
+
+  await deleteIn(supabase, "action_logs", "task_id", taskIds, "Delete project task action logs");
+  await deleteIn(supabase, "ai_runs", "task_id", taskIds, "Delete project task AI runs");
+  await deleteIn(supabase, "handoff_summaries", "task_id", taskIds, "Delete project task handoff history");
+
+  const log =
+    (await insertActionLog(supabase, {
+      project_id: project.id,
+      actor: "User",
+      action: "task_history.cleared",
+      details: `Cleared history for ${taskIds.length} task${taskIds.length === 1 ? "" : "s"} in ${project.name}.`,
+      created_at: now,
+    })) ??
+    localLog({
+      project_id: project.id,
+      actor: "User",
+      action: "task_history.cleared",
+      details: `Cleared history for ${taskIds.length} task${taskIds.length === 1 ? "" : "s"} in ${project.name}.`,
+      created_at: now,
+    });
+
+  return { taskIds, log };
+}
+
+export async function deleteTaskInDb(task: Task) {
+  assertSupabaseReady();
+  const supabase = getSupabaseClient();
+  const now = new Date().toISOString();
+  const contentItemsResult = await supabase.from("content_items").select("id").eq("task_id", task.id);
+
+  throwUnlessMissingTable("Load linked task content items", contentItemsResult.error);
+  const contentItemIds = isMissingTable(contentItemsResult.error)
+    ? []
+    : ((contentItemsResult.data ?? []) as Array<{ id: string }>).map((item) => item.id);
+
+  await deleteEq(supabase, "action_logs", "task_id", task.id, "Delete task action logs");
+
+  const log =
+    (await insertActionLog(supabase, {
+      project_id: task.project_id,
+      actor: "User",
+      action: "task.deleted",
+      details: `Deleted task: ${task.title}.`,
+      created_at: now,
+    })) ??
+    localLog({
+      project_id: task.project_id,
+      actor: "User",
+      action: "task.deleted",
+      details: `Deleted task: ${task.title}.`,
+      created_at: now,
+    });
+
+  await deleteEq(supabase, "approvals", "task_id", task.id, "Delete task approvals");
+  await deleteEq(supabase, "ai_runs", "task_id", task.id, "Delete task AI runs");
+  await deleteEq(supabase, "handoff_summaries", "task_id", task.id, "Delete task handoff summaries");
+  await deleteEq(supabase, "task_states", "task_id", task.id, "Delete task state");
+  await deleteEq(supabase, "content_posts", "task_id", task.id, "Delete task content posts");
+  await deleteIn(supabase, "publish_logs", "content_item_id", contentItemIds, "Delete task publish logs");
+  await deleteIn(supabase, "content_schedule", "content_item_id", contentItemIds, "Delete task content schedules");
+  await deleteIn(supabase, "content_routes", "content_item_id", contentItemIds, "Delete task content routes");
+  await deleteEq(supabase, "content_items", "task_id", task.id, "Delete task content items");
+
+  const messageResult = await supabase
+    .from("messages")
+    .update({ linked_task_id: null })
+    .eq("linked_task_id", task.id)
+    .select("*");
+
+  throwUnlessMissingTable("Unlink task inbox messages", messageResult.error);
+
+  const deleteResult = await supabase.from("tasks").delete().eq("id", task.id).select("id");
+  throwIfError("Delete task", deleteResult.error);
+
+  if ((deleteResult.data ?? []).length === 0) {
+    throw new Error("Task was not deleted. Run database/schema.sql in Supabase SQL editor to add task delete policies, then press Reload.");
+  }
+
+  return {
+    taskId: task.id,
+    projectId: task.project_id,
+    contentItemIds,
+    messages: isMissingTable(messageResult.error) ? [] : ((messageResult.data ?? []) as MessageRow[]).map(normalizeMessage),
     log,
   };
 }
@@ -3115,7 +3320,7 @@ export async function createAutomationRuleInDb(input: {
     .single();
 
   if (isMissingTable(ruleResult.error)) {
-    throw new Error("Automation rules table is missing. Run database/schema.sql in Supabase SQL editor, then press Reload.");
+    throw new Error("Automation rules table is missing. Run database/phase9_automation_rules.sql in Supabase SQL editor, then press Reload.");
   }
 
   throwIfError("Create automation rule", ruleResult.error);
@@ -3152,7 +3357,7 @@ export async function updateAutomationRuleStatusInDb(rule: AutomationRule, statu
     .single();
 
   if (isMissingTable(ruleResult.error)) {
-    throw new Error("Automation rules table is missing. Run database/schema.sql in Supabase SQL editor, then press Reload.");
+    throw new Error("Automation rules table is missing. Run database/phase9_automation_rules.sql in Supabase SQL editor, then press Reload.");
   }
 
   throwIfError("Update automation rule", ruleResult.error);
@@ -3189,7 +3394,7 @@ export async function runAutomationRuleNowInDb(rule: AutomationRule) {
     .single();
 
   if (isMissingTable(ruleResult.error)) {
-    throw new Error("Automation rules table is missing. Run database/schema.sql in Supabase SQL editor, then press Reload.");
+    throw new Error("Automation rules table is missing. Run database/phase9_automation_rules.sql in Supabase SQL editor, then press Reload.");
   }
 
   throwIfError("Run automation rule", ruleResult.error);

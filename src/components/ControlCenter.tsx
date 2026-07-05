@@ -29,6 +29,9 @@ import {
   createTaskInDb,
   createTaskFromMessageInDb,
   deleteProjectInDb,
+  deleteProjectTaskHistoryInDb,
+  deleteTaskHistoryInDb,
+  deleteTaskInDb,
   draftReplyForMessageInDb,
   emptyControlCenterData,
   loadControlCenterData,
@@ -39,6 +42,7 @@ import {
   runAutomationRuleNowInDb,
   runContentAiActionInDb,
   updateAutomationRuleStatusInDb,
+  updateApprovalDraftInDb,
   updateMediaAssetStatusInDb,
   updateInboxMessageStatusInDb,
   updateProjectMemoryInDb,
@@ -145,6 +149,20 @@ function localDateKey(date: Date) {
 
 function sourceLabel(source: string) {
   return `${source.charAt(0).toUpperCase()}${source.slice(1)}`;
+}
+
+function metadataString(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function requestedActionTargetId(requestedAction: string) {
+  const separatorIndex = requestedAction.indexOf(":");
+  return separatorIndex >= 0 ? requestedAction.slice(separatorIndex + 1).trim() : "";
+}
+
+function approvalLinkedMessageId(approval: Approval) {
+  return metadataString(approval.metadata, "message_id") || approval.target_id || requestedActionTargetId(approval.requested_action);
 }
 
 function notificationToneClass(tone: DashboardNotification["tone"]) {
@@ -1110,6 +1128,103 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     }
   }
 
+  async function handleClearTaskHistory(taskId: string) {
+    const task = data.tasks.find((item) => item.id === taskId);
+
+    if (!task || !window.confirm(`Clear AI runs, handoffs, and action logs for "${task.title}"?`)) {
+      return;
+    }
+
+    setIsSaving(true);
+    setLoadError("");
+
+    try {
+      const result = await deleteTaskHistoryInDb(task);
+
+      setData((current) => ({
+        ...current,
+        action_logs: [result.log, ...current.action_logs.filter((log) => log.task_id !== taskId)],
+        ai_runs: current.ai_runs.filter((run) => run.task_id !== taskId),
+        handoff_summaries: current.handoff_summaries.filter((handoff) => handoff.task_id !== taskId),
+      }));
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleClearProjectTaskHistory() {
+    if (!selectedProject) {
+      return;
+    }
+
+    const projectTasks = data.tasks.filter((task) => task.project_id === selectedProject.id);
+
+    if (projectTasks.length === 0 || !window.confirm(`Clear history for all ${projectTasks.length} task${projectTasks.length === 1 ? "" : "s"} in "${selectedProject.name}"?`)) {
+      return;
+    }
+
+    setIsSaving(true);
+    setLoadError("");
+
+    try {
+      const result = await deleteProjectTaskHistoryInDb(selectedProject, projectTasks);
+      const taskIds = new Set(result.taskIds);
+
+      setData((current) => ({
+        ...current,
+        action_logs: [result.log, ...current.action_logs.filter((log) => !log.task_id || !taskIds.has(log.task_id))],
+        ai_runs: current.ai_runs.filter((run) => !taskIds.has(run.task_id)),
+        handoff_summaries: current.handoff_summaries.filter((handoff) => !taskIds.has(handoff.task_id)),
+      }));
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDeleteTask(taskId: string) {
+    const task = data.tasks.find((item) => item.id === taskId);
+
+    if (!task || !window.confirm(`Delete task "${task.title}" and its linked history?`)) {
+      return;
+    }
+
+    setIsSaving(true);
+    setLoadError("");
+
+    try {
+      const result = await deleteTaskInDb(task);
+      const contentItemIds = new Set(result.contentItemIds);
+
+      setData((current) => ({
+        ...current,
+        tasks: current.tasks.filter((item) => item.id !== taskId),
+        task_states: Object.fromEntries(Object.entries(current.task_states).filter(([id]) => id !== taskId)),
+        action_logs: [result.log, ...current.action_logs.filter((log) => log.task_id !== taskId)],
+        ai_runs: current.ai_runs.filter((run) => run.task_id !== taskId),
+        handoff_summaries: current.handoff_summaries.filter((handoff) => handoff.task_id !== taskId),
+        approvals: current.approvals.filter((approval) => approval.task_id !== taskId),
+        messages: current.messages.map((message) => {
+          const updated = result.messages.find((item) => item.id === message.id);
+          return updated ?? (message.linked_task_id === taskId ? { ...message, linked_task_id: undefined } : message);
+        }),
+        content_items: current.content_items.filter((item) => item.task_id !== taskId),
+        content_routes: current.content_routes.filter((route) => !contentItemIds.has(route.content_item_id)),
+        content_schedule: current.content_schedule.filter((schedule) => !contentItemIds.has(schedule.content_item_id)),
+        publish_logs: current.publish_logs.filter((log) => !contentItemIds.has(log.content_item_id)),
+      }));
+      setSelectedTaskId((current) => (current === taskId ? data.tasks.find((item) => item.id !== taskId)?.id ?? "" : current));
+      setSelectedProjectId(result.projectId);
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   async function handleGenerateHandoff() {
     const task = selectedTask;
     const state = selectedState;
@@ -1206,7 +1321,48 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     }
   }
 
-  async function handleApprove(approvalId: string) {
+  async function handleSaveApprovalDraft(approvalId: string, draftText: string) {
+    const approval = data.approvals.find((item) => item.id === approvalId);
+
+    if (!approval) {
+      return;
+    }
+
+    const message = data.messages.find((item) => item.id === approvalLinkedMessageId(approval));
+
+    setIsSaving(true);
+    setLoadError("");
+
+    try {
+      const result = await updateApprovalDraftInDb(approval, draftText, message);
+
+      setData((current) => ({
+        ...current,
+        approvals: current.approvals.map((item) => (item.id === approvalId ? result.approval : item)),
+        messages: result.message
+          ? current.messages.map((item) => (item.id === result.message?.id ? result.message : item))
+          : current.messages,
+        action_logs: [result.log, ...current.action_logs],
+      }));
+      showApprovalToast({
+        title: "Draft saved",
+        detail: "Manual reply draft was saved to the approval packet.",
+        tone: "success",
+      });
+    } catch (error) {
+      const messageText = getErrorMessage(error);
+      setLoadError(messageText);
+      showApprovalToast({
+        title: "Draft save failed",
+        detail: messageText,
+        tone: "error",
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleApprove(approvalId: string, draftText?: string) {
     const approval = data.approvals.find((item) => item.id === approvalId);
 
     if (!approval) {
@@ -1223,6 +1379,14 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     setLoadError("");
 
     try {
+      let draftLog: ActionLog | undefined;
+
+      if (draftText && draftText.trim() !== approval.draft_text.trim()) {
+        const message = data.messages.find((item) => item.id === approvalLinkedMessageId(approval));
+        const draftResult = await updateApprovalDraftInDb(approval, draftText, message);
+        draftLog = draftResult.log;
+      }
+
       const response = await fetch("/api/approvals/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1261,7 +1425,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
             )
           : current.content_schedule,
         publish_logs: result.publishLogs ? [...result.publishLogs, ...current.publish_logs] : current.publish_logs,
-        action_logs: [result.log, ...current.action_logs],
+        action_logs: [result.log, ...(draftLog ? [draftLog] : []), ...current.action_logs],
       }));
 
       try {
@@ -1515,6 +1679,9 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     </div>
   ) : null;
 
+  const setupSqlPath = loadError.includes("Automation rules table is missing")
+    ? "database/phase9_automation_rules.sql"
+    : "database/schema.sql";
   const databaseAlert = loadError ? (
     <section className="rounded-lg border border-amber-400/40 bg-amber-400/10 p-4 text-sm leading-6 text-amber-100" aria-live="polite">
       <div className="flex items-start gap-3">
@@ -1522,7 +1689,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         <div className="min-w-0">
           <p className="font-semibold">Supabase is connected, but the database is not ready.</p>
           <p className="mt-1 break-words">{loadError}</p>
-          <p className="mt-2 text-amber-100/80">Run <span className="font-mono">database/schema.sql</span> in Supabase SQL editor, then press Reload.</p>
+          <p className="mt-2 text-amber-100/80">Run <span className="font-mono">{setupSqlPath}</span> in Supabase SQL editor, then press Reload.</p>
         </div>
       </div>
     </section>
@@ -1639,6 +1806,8 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
             }}
             onStart={() => void handleStartTask(task.id)}
             onContinue={() => void handleContinueTask(task.id)}
+            onClearHistory={() => void handleClearTaskHistory(task.id)}
+            onDelete={() => void handleDeleteTask(task.id)}
           />
         );
       })}
@@ -1928,7 +2097,19 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
               <p className="text-sm font-medium text-zinc-400">{selectedProject?.name ?? "Supabase Workspace"}</p>
               <h2 className="text-2xl font-semibold text-zinc-50">Tasks</h2>
             </div>
-            <AiSwitcher selected={selectedModel} onSelect={setSelectedModel} />
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void handleClearProjectTaskHistory()}
+                disabled={!selectedProject || data.tasks.filter((task) => task.project_id === selectedProject.id).length === 0 || isSaving}
+                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-zinc-700 px-3 text-sm font-medium text-zinc-100 transition hover:border-amber-300 hover:text-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
+                title="Clear AI runs, handoffs, and action logs for all tasks in this project"
+              >
+                <History className="h-4 w-4" aria-hidden="true" />
+                Clear Project History
+              </button>
+              <AiSwitcher selected={selectedModel} onSelect={setSelectedModel} />
+            </div>
           </div>
           {taskCards}
         </div>
@@ -2015,7 +2196,14 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
   }
 
   if (view === "approvals") {
-    return renderShell(<ApprovalQueue approvals={data.approvals} messages={data.messages} onApprove={(approvalId) => void handleApprove(approvalId)} />);
+    return renderShell(
+      <ApprovalQueue
+        approvals={data.approvals}
+        messages={data.messages}
+        onApprove={(approvalId, draftText) => void handleApprove(approvalId, draftText)}
+        onSaveDraft={(approvalId, draftText) => void handleSaveApprovalDraft(approvalId, draftText)}
+      />,
+    );
   }
 
   if (view === "memory") {
@@ -2428,6 +2616,8 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
                     }}
                     onStart={() => void handleStartTask(task.id)}
                     onContinue={() => void handleContinueTask(task.id)}
+                    onClearHistory={() => void handleClearTaskHistory(task.id)}
+                    onDelete={() => void handleDeleteTask(task.id)}
                   />
                 );
               })}
@@ -2455,7 +2645,12 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
               isSaving={isSaving}
               onGenerate={() => void handleGenerateHandoff()}
             />
-            <ApprovalQueue approvals={data.approvals} messages={data.messages} onApprove={(approvalId) => void handleApprove(approvalId)} />
+            <ApprovalQueue
+              approvals={data.approvals}
+              messages={data.messages}
+              onApprove={(approvalId, draftText) => void handleApprove(approvalId, draftText)}
+              onSaveDraft={(approvalId, draftText) => void handleSaveApprovalDraft(approvalId, draftText)}
+            />
           </aside>
         </section>
       </main>
