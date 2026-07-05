@@ -72,6 +72,16 @@ function normalizeConnector(row: ConnectorRow): Connector {
   };
 }
 
+function isSchemaMismatch(error: { code?: string; message: string } | null) {
+  return Boolean(
+    error?.code === "PGRST204" ||
+      error?.code === "42703" ||
+      error?.message.includes("schema cache") ||
+      error?.message.includes("column") ||
+      error?.message.includes("does not exist"),
+  );
+}
+
 function textValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -137,12 +147,15 @@ function nextStatus(status: ConnectorStatus): ConnectorStatus {
 async function loadMetaConnectors() {
   const supabase = getSupabaseClient();
   const result = await supabase.from("connectors").select("*").in("type", ["facebook", "instagram"]).order("updated_at", { ascending: false });
+  const finalResult = result.error && isSchemaMismatch(result.error)
+    ? await supabase.from("connectors").select("*").in("type", ["facebook", "instagram"]).order("created_at", { ascending: false })
+    : result;
 
-  if (result.error) {
-    throw new Error(`Load Meta connectors: ${result.error.message}`);
+  if (finalResult.error) {
+    throw new Error(`Load Meta connectors: ${finalResult.error.message}`);
   }
 
-  return ((result.data ?? []) as ConnectorRow[]).map(normalizeConnector);
+  return ((finalResult.data ?? []) as ConnectorRow[]).map(normalizeConnector);
 }
 
 async function insertConnector(config: Record<string, unknown>) {
@@ -159,12 +172,24 @@ async function insertConnector(config: Record<string, unknown>) {
     })
     .select("*")
     .single();
+  const finalResult = result.error && isSchemaMismatch(result.error)
+    ? await supabase
+        .from("connectors")
+        .insert({
+          type: "facebook",
+          status: "configured",
+          config,
+          created_at: now,
+        })
+        .select("*")
+        .single()
+    : result;
 
-  if (result.error) {
-    throw new Error(`Save Meta connector event: ${result.error.message}`);
+  if (finalResult.error) {
+    throw new Error(`Save Meta connector event: ${finalResult.error.message}`);
   }
 
-  return normalizeConnector(result.data as ConnectorRow);
+  return normalizeConnector(finalResult.data as ConnectorRow);
 }
 
 async function updateConnector(connector: Connector, config: Record<string, unknown>) {
@@ -180,12 +205,23 @@ async function updateConnector(connector: Connector, config: Record<string, unkn
     .eq("id", connector.id)
     .select("*")
     .single();
+  const finalResult = result.error && isSchemaMismatch(result.error)
+    ? await supabase
+        .from("connectors")
+        .update({
+          status: nextStatus(connector.status),
+          config,
+        })
+        .eq("id", connector.id)
+        .select("*")
+        .single()
+    : result;
 
-  if (result.error) {
-    throw new Error(`Update Meta connector event: ${result.error.message}`);
+  if (finalResult.error) {
+    throw new Error(`Update Meta connector event: ${finalResult.error.message}`);
   }
 
-  return normalizeConnector(result.data as ConnectorRow);
+  return normalizeConnector(finalResult.data as ConnectorRow);
 }
 
 async function logConnectorEvent(connector: Connector, summary: MetaRouteSummary) {
