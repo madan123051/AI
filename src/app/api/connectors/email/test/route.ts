@@ -51,6 +51,15 @@ function configRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function isSchemaMismatch(error: { code?: string; message?: string } | null) {
+  return Boolean(
+    error?.code === "PGRST204" ||
+      error?.code === "42703" ||
+      error?.message?.includes("schema cache") ||
+      error?.message?.includes("column"),
+  );
+}
+
 async function findExistingConnector(projectId: string, connectorId: string) {
   const supabase = getSupabaseClient();
 
@@ -124,12 +133,23 @@ export async function POST(request: Request) {
       config,
       updated_at: now,
     };
+    const legacyPayload = {
+      project_id: projectId,
+      type: "email",
+      status,
+      config,
+    };
     const connectorResult = existing
       ? await supabase.from("connectors").update(payload).eq("id", existing.id).select("*").single()
       : await supabase.from("connectors").insert({ ...payload, created_at: now }).select("*").single();
+    const finalConnectorResult = connectorResult.error && isSchemaMismatch(connectorResult.error)
+      ? existing
+        ? await supabase.from("connectors").update(legacyPayload).eq("id", existing.id).select("*").single()
+        : await supabase.from("connectors").insert({ ...legacyPayload, created_at: now }).select("*").single()
+      : connectorResult;
 
-    if (connectorResult.error) {
-      throw new Error(`Save email connector test result: ${connectorResult.error.message}`);
+    if (finalConnectorResult.error) {
+      throw new Error(`Save email connector test result: ${finalConnectorResult.error.message}`);
     }
 
     const logResult = await supabase
@@ -153,7 +173,7 @@ export async function POST(request: Request) {
         ok: testResult.ok,
         summary: testResult.summary,
         checks: testResult.checks,
-        connector: normalizeConnector(connectorResult.data as ConnectorRow),
+        connector: normalizeConnector(finalConnectorResult.data as ConnectorRow),
         log: normalizeLog(logResult.data as ActionLogRow),
       },
       { status: 200 },
