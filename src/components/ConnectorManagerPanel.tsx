@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { Camera, Globe2, Mail, Plug, Save, ThumbsUp, type LucideIcon } from "lucide-react";
 import { EmailConnectorSetupPanel } from "@/components/EmailConnectorSetupPanel";
+import { MetaConnectorSetupPanel } from "@/components/MetaConnectorSetupPanel";
 import { WebsiteControlMapPanel } from "@/components/WebsiteControlMapPanel";
 import type { Connector, ConnectorStatus, ConnectorType, ContentItem, Message, Project, Rule, WebsiteControlMapEntry } from "@/lib/types";
 
@@ -248,6 +249,11 @@ export function ConnectorManagerPanel({
   const connectedCount = connectors.filter((connector) => connector.status === "connected").length;
   const pausedCount = connectors.filter((connector) => connector.status === "paused").length;
   const emailConnector = connectors.find((connector) => connector.type === "email");
+  const facebookConnector = connectors.find((connector) => connector.type === "facebook");
+  const instagramConnector = connectors.find((connector) => connector.type === "instagram");
+  const supportingDefinitions = connectorDefinitions.filter(
+    (definition) => definition.type !== "facebook" && definition.type !== "instagram",
+  );
 
   return (
     <section className="flex flex-col gap-6">
@@ -278,8 +284,17 @@ export function ConnectorManagerPanel({
         onTestConnector={onTestEmailConnector}
       />
 
+      <MetaConnectorSetupPanel
+        key={`${project?.id ?? "no-project"}-${facebookConnector?.updated_at ?? facebookConnector?.created_at ?? "facebook-draft"}-${instagramConnector?.updated_at ?? instagramConnector?.created_at ?? "instagram-draft"}`}
+        project={project}
+        facebookConnector={facebookConnector}
+        instagramConnector={instagramConnector}
+        isSaving={isSaving}
+        onSaveConnector={onSaveConnector}
+      />
+
       <div className="grid gap-4 lg:grid-cols-2">
-        {connectorDefinitions.map((definition) => {
+        {supportingDefinitions.map((definition) => {
           const connector = connectors.find((item) => item.type === definition.type);
           const messageCount = messages.filter((message) => message.source === definition.type).length;
           const contentCount =
