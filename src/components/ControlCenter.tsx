@@ -103,6 +103,9 @@ type ApproveApiResult = {
   error?: string;
 };
 
+const deferredOpenTaskKey = "ai-control-center:open-task";
+const deferredOpenMessageKey = "ai-control-center:open-message";
+
 const viewConfig: Record<AppView, { title: string; subtitle: string }> = {
   dashboard: { title: "Dashboard", subtitle: "Command overview" },
   projects: { title: "Projects", subtitle: "Workspaces and lifecycle" },
@@ -264,20 +267,46 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
 
     try {
       const loaded = await loadControlCenterData();
+      const deferredTaskId = window.sessionStorage.getItem(deferredOpenTaskKey) ?? "";
+      const deferredMessageId = window.sessionStorage.getItem(deferredOpenMessageKey) ?? "";
+      const deferredMessage = deferredMessageId ? loaded.messages.find((message) => message.id === deferredMessageId) : undefined;
+      const deferredTask = deferredTaskId
+        ? loaded.tasks.find((task) => task.id === deferredTaskId)
+        : deferredMessage?.linked_task_id
+          ? loaded.tasks.find((task) => task.id === deferredMessage.linked_task_id)
+          : undefined;
 
       setData(loaded);
+
+      if (deferredTaskId) {
+        window.sessionStorage.removeItem(deferredOpenTaskKey);
+      }
+
+      if (deferredMessageId) {
+        window.sessionStorage.removeItem(deferredOpenMessageKey);
+      }
+
       setSelectedTaskId((current) => {
         if (current && loaded.tasks.some((task) => task.id === current)) {
           return current;
+        }
+
+        if (deferredTask) {
+          return deferredTask.id;
         }
 
         return loaded.tasks[0]?.id ?? "";
       });
       setSelectedProjectId((current) => {
         const activeProjects = loaded.projects.filter((project) => project.status !== "archived");
+        const deferredProjectId = deferredMessage?.project_id ?? deferredTask?.project_id;
 
         if (current && loaded.projects.some((project) => project.id === current)) {
           return current;
+        }
+
+        if (deferredProjectId && loaded.projects.some((project) => project.id === deferredProjectId)) {
+          return deferredProjectId;
         }
 
         return activeProjects[0]?.id ?? loaded.projects[0]?.id ?? "";
@@ -1390,6 +1419,33 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     }
   }
 
+  function handleOpenLinkedMessage(messageId: string) {
+    const message = data.messages.find((item) => item.id === messageId);
+
+    if (message) {
+      setSelectedProjectId(message.project_id);
+
+      if (message.linked_task_id) {
+        setSelectedTaskId(message.linked_task_id);
+      }
+    }
+
+    window.sessionStorage.setItem(deferredOpenMessageKey, messageId);
+    window.location.assign("/inbox");
+  }
+
+  function handleOpenLinkedTask(taskId: string) {
+    const task = data.tasks.find((item) => item.id === taskId);
+
+    if (task) {
+      setSelectedTaskId(task.id);
+      setSelectedProjectId(task.project_id);
+    }
+
+    window.sessionStorage.setItem(deferredOpenTaskKey, taskId);
+    window.location.assign("/tasks");
+  }
+
   async function handleSaveApprovalDraft(approvalId: string, draftText: string) {
     const approval = data.approvals.find((item) => item.id === approvalId);
 
@@ -2269,8 +2325,11 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
       <ApprovalQueue
         approvals={data.approvals}
         messages={data.messages}
+        tasks={data.tasks}
         onApprove={(approvalId, draftText) => void handleApprove(approvalId, draftText)}
         onSaveDraft={(approvalId, draftText) => void handleSaveApprovalDraft(approvalId, draftText)}
+        onOpenMessage={handleOpenLinkedMessage}
+        onOpenTask={handleOpenLinkedTask}
       />,
     );
   }
@@ -2718,8 +2777,11 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
             <ApprovalQueue
               approvals={data.approvals}
               messages={data.messages}
+              tasks={data.tasks}
               onApprove={(approvalId, draftText) => void handleApprove(approvalId, draftText)}
               onSaveDraft={(approvalId, draftText) => void handleSaveApprovalDraft(approvalId, draftText)}
+              onOpenMessage={handleOpenLinkedMessage}
+              onOpenTask={handleOpenLinkedTask}
             />
           </aside>
         </section>

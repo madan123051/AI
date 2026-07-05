@@ -1,15 +1,36 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { AlertTriangle, Check, Clock3, Pencil, Save, ShieldAlert } from "lucide-react";
-import type { Approval, Message } from "@/lib/types";
+import { AlertTriangle, Check, Clock3, ListChecks, MessageSquareText, Pencil, RotateCcw, Save, ShieldAlert } from "lucide-react";
+import type { Approval, Message, Task } from "@/lib/types";
 
 interface ApprovalQueueProps {
   approvals: Approval[];
   messages?: Message[];
+  tasks?: Task[];
   onApprove: (approvalId: string, draftText?: string) => void;
   onSaveDraft?: (approvalId: string, draftText: string) => void;
+  onOpenMessage?: (messageId: string) => void;
+  onOpenTask?: (taskId: string) => void;
 }
+
+type ReplyStatusFilter = "all" | "pending" | "executed" | "failed" | "execution_pending";
+type ReplySourceFilter = "all" | "website" | "email" | "comment";
+
+const statusFilters: Array<{ value: ReplyStatusFilter; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "pending", label: "Pending" },
+  { value: "executed", label: "Executed" },
+  { value: "failed", label: "Failed" },
+  { value: "execution_pending", label: "Execution Pending" },
+];
+
+const sourceFilters: Array<{ value: ReplySourceFilter; label: string }> = [
+  { value: "all", label: "All Sources" },
+  { value: "website", label: "Website" },
+  { value: "email", label: "Email" },
+  { value: "comment", label: "Comment" },
+];
 
 function label(value: string) {
   return value
@@ -80,15 +101,17 @@ function metadataText(record: Record<string, unknown> | undefined, key: string) 
 }
 
 function executionMetadata(approval: Approval) {
-  const result = approval.metadata.execution_result;
+  const result = executionResultRecord(approval);
 
-  if (!result || typeof result !== "object") {
-    return undefined;
-  }
-
-  const metadata = (result as { metadata?: unknown }).metadata;
+  const metadata = result?.metadata;
 
   return metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : undefined;
+}
+
+function executionResultRecord(approval: Approval) {
+  const result = approval.metadata.execution_result;
+
+  return result && typeof result === "object" ? (result as Record<string, unknown>) : undefined;
 }
 
 function firstMetadataText(records: Array<Record<string, unknown> | undefined>, keys: string[]) {
@@ -130,8 +153,84 @@ function canRunApproval(approval: Approval) {
   );
 }
 
-export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft }: ApprovalQueueProps) {
+function statusMatchesFilter(approval: Approval, filter: ReplyStatusFilter) {
+  if (filter === "all") {
+    return true;
+  }
+
+  if (filter === "pending") {
+    return isPendingReview(approval);
+  }
+
+  return approval.execution_status === filter;
+}
+
+function replySource(approval: Approval, message?: Message): ReplySourceFilter {
+  if (approval.action_type === "reply_comment") {
+    return "comment";
+  }
+
+  if (approval.connector === "email" || message?.source === "gmail") {
+    return "email";
+  }
+
+  return "website";
+}
+
+function formatDateTime(iso?: string) {
+  if (!iso) {
+    return "";
+  }
+
+  const date = new Date(iso);
+
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function sentOrRepliedAt(approval: Approval, message?: Message) {
+  const executionResult = executionResultRecord(approval);
+  const executionMeta = executionMetadata(approval);
+  const value = firstMetadataText(
+    [executionMeta, executionResult, message?.metadata, approval.metadata],
+    ["executed_at", "sent_at", "replied_at", "reply_approved_at", "reply_execution_attempted_at", "evaluated_at"],
+  );
+
+  return value || (approval.execution_status === "executed" ? approval.resolved_at ?? "" : "");
+}
+
+function statusCount(approvals: Approval[], filter: ReplyStatusFilter) {
+  return approvals.filter((approval) => statusMatchesFilter(approval, filter)).length;
+}
+
+function sourceCount(approvals: Approval[], messagesById: Map<string, Message>, filter: ReplySourceFilter) {
+  if (filter === "all") {
+    return approvals.length;
+  }
+
+  return approvals.filter((approval) => replySource(approval, messagesById.get(approvalMessageId(approval))) === filter).length;
+}
+
+export function ApprovalQueue({
+  approvals,
+  messages = [],
+  tasks = [],
+  onApprove,
+  onSaveDraft,
+  onOpenMessage,
+  onOpenTask,
+}: ApprovalQueueProps) {
   const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
+  const [statusFilter, setStatusFilter] = useState<ReplyStatusFilter>("all");
+  const [sourceFilter, setSourceFilter] = useState<ReplySourceFilter>("all");
   const sortedApprovals = useMemo(
     () =>
       approvals
@@ -142,33 +241,84 @@ export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft
     [approvals],
   );
   const messagesById = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages]);
-  const pendingCount = sortedApprovals.filter(isPendingReview).length;
+  const tasksById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+  const filteredApprovals = useMemo(
+    () =>
+      sortedApprovals.filter((approval) => {
+        const message = messagesById.get(approvalMessageId(approval));
+
+        return statusMatchesFilter(approval, statusFilter) && (sourceFilter === "all" || replySource(approval, message) === sourceFilter);
+      }),
+    [messagesById, sortedApprovals, sourceFilter, statusFilter],
+  );
+  const pendingCount = statusCount(sortedApprovals, "pending");
   const attentionCount = sortedApprovals.filter(needsAttention).length;
-  const executedCount = sortedApprovals.filter((approval) => approval.execution_status === "executed").length;
+  const executedCount = statusCount(sortedApprovals, "executed");
 
   return (
     <section className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-4">
-      <div className="mb-4 flex items-center justify-between gap-3">
+      <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
         <div>
-          <h2 className="text-sm font-semibold uppercase tracking-normal text-zinc-400">Approvals</h2>
+          <h2 className="text-sm font-semibold uppercase tracking-normal text-zinc-400">Unified Reply Center</h2>
           <p className="mt-1 text-lg font-semibold text-zinc-50">{pendingCount} pending review</p>
           <p className="mt-1 text-xs text-zinc-500">
             {attentionCount} need attention · {executedCount} executed in history
           </p>
         </div>
-        <ShieldAlert className="h-5 w-5 text-amber-300" aria-hidden="true" />
+        <ShieldAlert className="hidden h-5 w-5 text-amber-300 xl:block" aria-hidden="true" />
+      </div>
+
+      <div className="mb-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+        {statusFilters.map((filter) => (
+          <button
+            key={filter.value}
+            type="button"
+            onClick={() => setStatusFilter(filter.value)}
+            className={`min-h-10 rounded-lg border px-3 text-left text-sm transition ${
+              statusFilter === filter.value
+                ? "border-amber-300 bg-amber-300/10 text-amber-50"
+                : "border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:border-zinc-600"
+            }`}
+          >
+            <span className="block font-medium">{filter.label}</span>
+            <span className="text-xs text-zinc-500">{statusCount(sortedApprovals, filter.value)}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="mb-4 flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-wrap gap-2">
+          {sourceFilters.map((filter) => (
+            <button
+              key={filter.value}
+              type="button"
+              onClick={() => setSourceFilter(filter.value)}
+              className={`inline-flex min-h-9 items-center justify-center rounded-lg border px-3 text-sm transition ${
+                sourceFilter === filter.value
+                  ? "border-sky-300 bg-sky-300/10 text-sky-50"
+                  : "border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:border-zinc-600"
+              }`}
+            >
+              {filter.label}
+              <span className="ml-2 text-xs text-zinc-500">{sourceCount(sortedApprovals, messagesById, filter.value)}</span>
+            </button>
+          ))}
+        </div>
+        <p className="text-sm text-zinc-500">{filteredApprovals.length} shown</p>
       </div>
 
       <div className="space-y-3">
-        {sortedApprovals.length === 0 ? (
-          <p className="text-sm text-zinc-500">No approval activity yet.</p>
+        {filteredApprovals.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-zinc-700 p-4 text-sm text-zinc-500">No replies match these filters.</p>
         ) : (
-          sortedApprovals.map((approval) => {
+          filteredApprovals.map((approval) => {
             const canApprove = approval.status === "pending" && approval.execution_status === "pending_review";
             const canRetry = approval.status === "approved" && (approval.execution_status === "execution_pending" || approval.execution_status === "failed");
             const canExecute = canRunApproval(approval);
             const canEditDraft = canExecute && Boolean(onSaveDraft);
             const message = messagesById.get(approvalMessageId(approval));
+            const linkedTaskId = message?.linked_task_id || approval.task_id;
+            const linkedTask = tasksById.get(linkedTaskId);
             const draftValue = draftEdits[approval.id] ?? approval.draft_text;
             const draftDirty = draftValue.trim() !== approval.draft_text.trim();
             const hasDraftText = draftValue.trim().length > 0;
@@ -182,9 +332,19 @@ export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft
             const targetType = firstMetadataText(metadataRecords, ["targetType", "target_type", "comment_target_type"]);
             const targetId = firstMetadataText(metadataRecords, ["targetId", "target_id", "comment_target_id"]);
             const replyDocId = firstMetadataText(metadataRecords, ["firestore_reply_doc_id"]);
+            const emailMessageId = firstMetadataText(metadataRecords, ["email_message_id"]);
+            const sentAt = sentOrRepliedAt(approval, message);
+            const source = replySource(approval, message);
+            const actionIcon = canRetry ? (
+              <RotateCcw className="h-4 w-4" aria-hidden="true" />
+            ) : canExecute ? (
+              <Check className="h-4 w-4" aria-hidden="true" />
+            ) : (
+              <Clock3 className="h-4 w-4" aria-hidden="true" />
+            );
 
             return (
-            <article key={approval.id} className={`rounded-md border p-3 ${approvalCardClass(approval.execution_status)}`}>
+              <article key={approval.id} className={`rounded-md border p-3 ${approvalCardClass(approval.execution_status)}`}>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
@@ -195,9 +355,12 @@ export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft
                     <span className="rounded-full border border-amber-300/40 px-2 py-0.5 font-mono text-xs text-amber-100/80">
                       {approval.action_type}
                     </span>
+                    <span className="rounded-full border border-sky-300/40 px-2 py-0.5 text-xs font-medium text-sky-100/80">
+                      {label(source)}
+                    </span>
                   </div>
                   <p className="mt-2 break-words text-sm leading-6 text-zinc-300">{approval.reason}</p>
-                  <div className="mt-3 grid gap-2 text-sm leading-6 text-zinc-100">
+                  <div className="mt-3 grid gap-2 text-sm leading-6 text-zinc-100 lg:grid-cols-2">
                     <p>
                       <span className="font-semibold text-amber-100">After approval:</span> {actionSummary(approval)}
                     </p>
@@ -209,17 +372,57 @@ export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft
                         <span className="font-semibold text-amber-100">Inbox status:</span> {label(message.status)}
                       </p>
                     ) : null}
-                    {commentDocId || targetType || targetId ? (
+                    {linkedTask ? (
                       <p>
+                        <span className="font-semibold text-amber-100">Linked task:</span> {linkedTask.title}
+                      </p>
+                    ) : null}
+                    <p>
+                      <span className="font-semibold text-amber-100">Created:</span> {formatDateTime(approval.created_at)}
+                    </p>
+                    {sentAt ? (
+                      <p>
+                        <span className="font-semibold text-emerald-100">Sent/replied:</span> {formatDateTime(sentAt)}
+                      </p>
+                    ) : null}
+                    {commentDocId || targetType || targetId ? (
+                      <p className="lg:col-span-2">
                         <span className="font-semibold text-amber-100">Website context:</span>{" "}
                         {targetType || "target"} {targetId ? `/${targetId}` : ""} {commentDocId ? `· comment ${commentDocId}` : ""}
                       </p>
                     ) : null}
                     {replyDocId ? (
-                      <p>
+                      <p className="lg:col-span-2">
                         <span className="font-semibold text-emerald-100">Executed reply:</span> comments/{replyDocId}
                       </p>
                     ) : null}
+                    {emailMessageId ? (
+                      <p className="lg:col-span-2">
+                        <span className="font-semibold text-emerald-100">Email message:</span> {emailMessageId}
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => message && onOpenMessage?.(message.id)}
+                      disabled={!message || !onOpenMessage}
+                      className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-zinc-700 px-3 text-sm font-medium text-zinc-100 transition hover:border-sky-300 hover:text-sky-200 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <MessageSquareText className="h-4 w-4" aria-hidden="true" />
+                      Open Message
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => linkedTaskId && onOpenTask?.(linkedTaskId)}
+                      disabled={!linkedTaskId || !onOpenTask}
+                      className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-zinc-700 px-3 text-sm font-medium text-zinc-100 transition hover:border-emerald-300 hover:text-emerald-200 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <ListChecks className="h-4 w-4" aria-hidden="true" />
+                      Open Task
+                    </button>
+                  </div>
+                  <div className="mt-3 grid gap-2 text-sm leading-6 text-zinc-100">
                     {approval.draft_text || canEditDraft ? (
                       <div className="rounded-lg border border-amber-300/20 bg-zinc-950/40 p-3">
                         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -286,7 +489,7 @@ export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft
                   className="inline-flex min-h-9 shrink-0 items-center justify-center gap-2 rounded-lg bg-amber-300 px-3 text-sm font-semibold text-zinc-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
                   title={canRetry ? "Retry connector execution" : "Approve action"}
                 >
-                  {canExecute ? <Check className="h-4 w-4" aria-hidden="true" /> : <Clock3 className="h-4 w-4" aria-hidden="true" />}
+                  {actionIcon}
                   {canApprove
                     ? draftDirty ? "Save & Approve" : "Approve"
                     : canRetry
@@ -294,7 +497,7 @@ export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft
                       : label(approval.execution_status)}
                 </button>
               </div>
-            </article>
+              </article>
             );
           })
         )}
