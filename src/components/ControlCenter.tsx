@@ -54,6 +54,7 @@ import type {
   AiModelId,
   Approval,
   AutomationStatus,
+  Connector,
   ContentAiAction,
   ContentItem,
   ContentRoute,
@@ -1016,6 +1017,74 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
       });
     } catch (error) {
       setLoadError(getErrorMessage(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleTestEmailConnector(input: Parameters<typeof upsertConnectorInDb>[0] & { connectorId?: string }) {
+    setIsSaving(true);
+    setLoadError("");
+
+    try {
+      const response = await fetch("/api/connectors/email/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: input.projectId,
+          connectorId: input.connectorId,
+          config: input.config,
+        }),
+      });
+      const result = (await response.json()) as {
+        ok?: boolean;
+        error?: string;
+        summary?: string;
+        checks?: Array<{ name: string; ok: boolean; detail: string }>;
+        connector?: Connector;
+        log?: ActionLog;
+      };
+
+      if (!response.ok) {
+        throw new Error(result.error ?? "Email connector test failed.");
+      }
+
+      const testedConnector = result.connector;
+
+      if (testedConnector) {
+        setData((current) => {
+          const exists = current.connectors.some((connector) => connector.id === testedConnector.id);
+
+          return {
+            ...current,
+            connectors: exists
+              ? current.connectors.map((connector) => (connector.id === testedConnector.id ? testedConnector : connector))
+              : [testedConnector, ...current.connectors],
+            action_logs: result.log ? [result.log, ...current.action_logs] : current.action_logs,
+          };
+        });
+      }
+
+      showApprovalToast({
+        title: result.ok ? "Email test passed" : "Email test failed",
+        detail: result.summary ?? "Email connector test completed.",
+        tone: result.ok ? "success" : "error",
+      });
+
+      return {
+        ok: Boolean(result.ok),
+        summary: result.summary ?? "Email connector test completed.",
+        checks: result.checks ?? [],
+      };
+    } catch (error) {
+      const message = getErrorMessage(error);
+      setLoadError(message);
+      showApprovalToast({
+        title: "Email test failed",
+        detail: message,
+        tone: "error",
+      });
+      throw error;
     } finally {
       setIsSaving(false);
     }
@@ -2231,6 +2300,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         rules={data.rules}
         isSaving={isSaving}
         onSaveConnector={handleSaveConnector}
+        onTestEmailConnector={handleTestEmailConnector}
       />,
     );
   }

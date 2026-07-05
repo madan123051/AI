@@ -22,6 +22,11 @@ type ConnectorManagerPanelProps = {
   rules: Rule[];
   isSaving: boolean;
   onSaveConnector: (input: SaveConnectorInput) => Promise<void> | void;
+  onTestEmailConnector: (input: SaveConnectorInput & { connectorId?: string }) => Promise<{
+    ok: boolean;
+    summary: string;
+    checks: Array<{ name: string; ok: boolean; detail: string }>;
+  }>;
 };
 
 type ConnectorDefinition = {
@@ -238,6 +243,7 @@ export function ConnectorManagerPanel({
   rules,
   isSaving,
   onSaveConnector,
+  onTestEmailConnector,
 }: ConnectorManagerPanelProps) {
   const connectedCount = connectors.filter((connector) => connector.status === "connected").length;
   const pausedCount = connectors.filter((connector) => connector.status === "paused").length;
@@ -269,6 +275,7 @@ export function ConnectorManagerPanel({
         connector={emailConnector}
         isSaving={isSaving}
         onSaveConnector={onSaveConnector}
+        onTestConnector={onTestEmailConnector}
       />
 
       <div className="grid gap-4 lg:grid-cols-2">

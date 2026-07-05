@@ -14,11 +14,24 @@ type SaveConnectorInput = {
   config: Record<string, unknown>;
 };
 
+type EmailConnectionCheck = {
+  name: string;
+  ok: boolean;
+  detail: string;
+};
+
+type EmailConnectionTestResult = {
+  ok: boolean;
+  summary: string;
+  checks: EmailConnectionCheck[];
+};
+
 type EmailConnectorSetupPanelProps = {
   project?: Project;
   connector?: Connector;
   isSaving: boolean;
   onSaveConnector: (input: SaveConnectorInput) => Promise<void> | void;
+  onTestConnector: (input: SaveConnectorInput & { connectorId?: string }) => Promise<EmailConnectionTestResult>;
 };
 
 const providerOptions: Array<{ value: EmailProvider; label: string }> = [
@@ -83,6 +96,7 @@ export function EmailConnectorSetupPanel({
   connector,
   isSaving,
   onSaveConnector,
+  onTestConnector,
 }: EmailConnectorSetupPanelProps) {
   const [provider, setProvider] = useState<EmailProvider>(configProvider(connector?.config));
   const [status, setStatus] = useState<ConnectorStatus>(
@@ -96,8 +110,11 @@ export function EmailConnectorSetupPanel({
   const [smtpPort, setSmtpPort] = useState(portValue(connector?.config, "smtp_port", "465"));
   const [smtpEncryption, setSmtpEncryption] = useState<EmailEncryption>(configEncryption(connector?.config, "smtp_encryption"));
   const [username, setUsername] = useState(configString(connector?.config, "username"));
+  const [isTesting, setIsTesting] = useState(false);
+  const [testResult, setTestResult] = useState<EmailConnectionTestResult | null>(null);
 
   const isImapProvider = provider === "imap_smtp";
+  const canTest = Boolean(project && isImapProvider && emailAddress.trim() && username.trim() && imapHost.trim() && smtpHost.trim() && !isSaving && !isTesting);
   const summary = useMemo(() => {
     if (!connector) {
       return "No email connector metadata saved yet.";
@@ -107,15 +124,10 @@ export function EmailConnectorSetupPanel({
     return `${savedProvider} metadata saved. Secrets are not stored in Supabase.`;
   }, [connector]);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (!project) {
-      return;
-    }
-
-    await onSaveConnector({
-      projectId: project.id,
+  function currentInput(): SaveConnectorInput & { connectorId?: string } {
+    return {
+      projectId: project?.id ?? "",
+      connectorId: connector?.id,
       type: "email",
       status,
       config: {
@@ -128,11 +140,46 @@ export function EmailConnectorSetupPanel({
         smtp_host: isImapProvider ? smtpHost.trim() : "",
         smtp_port: isImapProvider ? smtpPort.trim() : "",
         smtp_encryption: isImapProvider ? smtpEncryption : "",
-        credential_storage: "server_env_variables_later",
+        credential_storage: "server_env_variables",
+        password_env: "EMAIL_CONNECTOR_PASSWORD",
         secrets_saved: false,
-        capabilities: ["metadata_only", "test_connection_placeholder"],
+        capabilities: ["metadata", "server_side_connection_test"],
       },
-    });
+    };
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!project) {
+      return;
+    }
+
+    await onSaveConnector(currentInput());
+  }
+
+  async function handleTestConnection() {
+    if (!project) {
+      return;
+    }
+
+    setIsTesting(true);
+    setTestResult(null);
+
+    try {
+      const result = await onTestConnector(currentInput());
+      setTestResult(result);
+      setStatus(result.ok ? "connected" : "error");
+    } catch (error) {
+      setTestResult({
+        ok: false,
+        summary: error instanceof Error ? error.message : "Email connector test failed.",
+        checks: [],
+      });
+      setStatus("error");
+    } finally {
+      setIsTesting(false);
+    }
   }
 
   return (
@@ -156,7 +203,7 @@ export function EmailConnectorSetupPanel({
         <div className="flex gap-2">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-200" aria-hidden="true" />
           <p className="text-sm leading-6 text-amber-100">
-            Email password or app password must be stored only in server environment variables. This setup saves metadata only.
+            Email password or app password must be stored only in server environment variables. Set EMAIL_CONNECTOR_PASSWORD before testing.
           </p>
         </div>
       </div>
@@ -231,6 +278,9 @@ export function EmailConnectorSetupPanel({
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
           <p className="text-xs text-zinc-500">Saved state</p>
           <p className="mt-1 text-sm leading-6 text-zinc-300">{summary}</p>
+          {configString(connector?.config, "last_test_summary") ? (
+            <p className="mt-1 text-xs leading-5 text-zinc-500">{configString(connector?.config, "last_test_summary")}</p>
+          ) : null}
         </div>
       </div>
 
@@ -311,6 +361,21 @@ export function EmailConnectorSetupPanel({
         </div>
       )}
 
+      {testResult ? (
+        <div className={`mt-4 rounded-lg border p-3 ${testResult.ok ? "border-emerald-300/30 bg-emerald-300/10" : "border-rose-300/30 bg-rose-300/10"}`}>
+          <p className={`text-sm font-semibold ${testResult.ok ? "text-emerald-100" : "text-rose-100"}`}>{testResult.summary}</p>
+          {testResult.checks.length > 0 ? (
+            <div className="mt-2 grid gap-2">
+              {testResult.checks.map((check) => (
+                <p key={check.name} className={`text-sm leading-6 ${check.ok ? "text-emerald-100/90" : "text-rose-100/90"}`}>
+                  <span className="font-semibold">{check.name}:</span> {check.detail}
+                </p>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="mt-4 flex flex-col gap-2 sm:flex-row">
         <button
           type="submit"
@@ -322,12 +387,13 @@ export function EmailConnectorSetupPanel({
         </button>
         <button
           type="button"
-          disabled
-          className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-lg border border-zinc-800 px-3 text-sm font-medium text-zinc-500 disabled:cursor-not-allowed"
-          title="Server-side email connection test will be added later"
+          onClick={() => void handleTestConnection()}
+          disabled={!canTest}
+          className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-lg border border-zinc-700 px-3 text-sm font-medium text-zinc-100 transition hover:border-sky-300 hover:text-sky-200 disabled:cursor-not-allowed disabled:opacity-50"
+          title="Test server-side IMAP and SMTP login"
         >
           <TestTube2 className="h-4 w-4" aria-hidden="true" />
-          Test Connection
+          {isTesting ? "Testing..." : "Test Connection"}
         </button>
       </div>
     </form>
