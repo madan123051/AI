@@ -49,6 +49,15 @@ function textValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function serverEnvValue(value: string | undefined) {
+  const trimmed = value?.trim() ?? "";
+  const isQuoted =
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"));
+
+  return isQuoted ? trimmed.slice(1, -1) : trimmed;
+}
+
 function numberValue(value: unknown, fallback: number) {
   const parsed = typeof value === "number" ? value : Number.parseInt(textValue(value), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -68,13 +77,13 @@ function encryptionValue(value: unknown, fallback: EmailEncryption): EmailEncryp
 }
 
 function emailPassword() {
-  return process.env.EMAIL_CONNECTOR_PASSWORD ?? process.env.CUSTOM_EMAIL_PASSWORD ?? "";
+  return serverEnvValue(process.env.EMAIL_CONNECTOR_PASSWORD) || serverEnvValue(process.env.CUSTOM_EMAIL_PASSWORD);
 }
 
 function resolveConfig(input: EmailConnectorTestConfig): ResolvedEmailConfig {
   const provider = providerValue(input.provider);
-  const configuredEmailAddress = textValue(input.email_address) || process.env.EMAIL_CONNECTOR_ADDRESS || "";
-  const username = textValue(input.username) || process.env.EMAIL_CONNECTOR_USERNAME || configuredEmailAddress;
+  const configuredEmailAddress = textValue(input.email_address) || serverEnvValue(process.env.EMAIL_CONNECTOR_ADDRESS);
+  const username = textValue(input.username) || serverEnvValue(process.env.EMAIL_CONNECTOR_USERNAME) || configuredEmailAddress;
   const emailAddress = configuredEmailAddress || (username.includes("@") ? username : "");
 
   return {
@@ -82,10 +91,10 @@ function resolveConfig(input: EmailConnectorTestConfig): ResolvedEmailConfig {
     emailAddress,
     username,
     password: emailPassword(),
-    imapHost: textValue(input.imap_host) || process.env.EMAIL_IMAP_HOST || "",
+    imapHost: textValue(input.imap_host) || serverEnvValue(process.env.EMAIL_IMAP_HOST),
     imapPort: numberValue(input.imap_port ?? process.env.EMAIL_IMAP_PORT, 993),
     imapEncryption: encryptionValue(input.imap_encryption ?? process.env.EMAIL_IMAP_ENCRYPTION, "ssl_tls"),
-    smtpHost: textValue(input.smtp_host) || process.env.EMAIL_SMTP_HOST || "",
+    smtpHost: textValue(input.smtp_host) || serverEnvValue(process.env.EMAIL_SMTP_HOST),
     smtpPort: numberValue(input.smtp_port ?? process.env.EMAIL_SMTP_PORT, 465),
     smtpEncryption: encryptionValue(input.smtp_encryption ?? process.env.EMAIL_SMTP_ENCRYPTION, "ssl_tls"),
   };
