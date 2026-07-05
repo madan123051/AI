@@ -1234,8 +1234,12 @@ export async function updateApprovalDraftInDb(approval: Approval, draftText: str
     throw new Error("Reply draft cannot be empty.");
   }
 
-  if (approval.status !== "pending" || approval.execution_status !== "pending_review") {
-    throw new Error("Only pending approval drafts can be edited.");
+  const canEditPendingDraft = approval.status === "pending" && approval.execution_status === "pending_review";
+  const canEditRetryDraft =
+    approval.status === "approved" && (approval.execution_status === "execution_pending" || approval.execution_status === "failed");
+
+  if (!canEditPendingDraft && !canEditRetryDraft) {
+    throw new Error("Only pending or retryable approval drafts can be edited.");
   }
 
   const metadata = {

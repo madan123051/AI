@@ -56,6 +56,10 @@ function actionSummary(approval: Approval) {
   }
 
   if (approval.action_type === "reply_message") {
+    if (approval.connector === "website") {
+      return "Send an email reply to the website contact through the custom email connector.";
+    }
+
     return "Reply to the selected message through the connector.";
   }
 
@@ -119,6 +123,13 @@ function needsAttention(approval: Approval) {
   return approval.execution_status === "failed" || approval.execution_status === "execution_pending";
 }
 
+function canRunApproval(approval: Approval) {
+  return (
+    (approval.status === "pending" && approval.execution_status === "pending_review") ||
+    (approval.status === "approved" && (approval.execution_status === "execution_pending" || approval.execution_status === "failed"))
+  );
+}
+
 export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft }: ApprovalQueueProps) {
   const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
   const sortedApprovals = useMemo(
@@ -154,7 +165,9 @@ export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft
         ) : (
           sortedApprovals.map((approval) => {
             const canApprove = approval.status === "pending" && approval.execution_status === "pending_review";
-            const canEditDraft = canApprove && Boolean(onSaveDraft);
+            const canRetry = approval.status === "approved" && (approval.execution_status === "execution_pending" || approval.execution_status === "failed");
+            const canExecute = canRunApproval(approval);
+            const canEditDraft = canExecute && Boolean(onSaveDraft);
             const message = messagesById.get(approvalMessageId(approval));
             const draftValue = draftEdits[approval.id] ?? approval.draft_text;
             const draftDirty = draftValue.trim() !== approval.draft_text.trim();
@@ -249,7 +262,7 @@ export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft
                     {approval.execution_status === "execution_pending" ? (
                       <div className="flex gap-2 rounded-lg border border-amber-300/40 bg-amber-300/10 p-3 text-amber-100">
                         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                        <p>Approved, but actual connector reply/send is not implemented yet.</p>
+                        <p>{approval.execution_error || "Approved, but connector execution still needs a retry."}</p>
                       </div>
                     ) : null}
                     {approval.execution_status === "failed" ? (
@@ -269,12 +282,16 @@ export function ApprovalQueue({ approvals, messages = [], onApprove, onSaveDraft
                 <button
                   type="button"
                   onClick={() => onApprove(approval.id, draftDirty ? draftValue : undefined)}
-                  disabled={!canApprove || (draftDirty && !hasDraftText)}
+                  disabled={!canExecute || (draftDirty && !hasDraftText)}
                   className="inline-flex min-h-9 shrink-0 items-center justify-center gap-2 rounded-lg bg-amber-300 px-3 text-sm font-semibold text-zinc-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
-                  title="Approve action"
+                  title={canRetry ? "Retry connector execution" : "Approve action"}
                 >
-                  {canApprove ? <Check className="h-4 w-4" aria-hidden="true" /> : <Clock3 className="h-4 w-4" aria-hidden="true" />}
-                  {canApprove ? (draftDirty ? "Save & Approve" : "Approve") : label(approval.execution_status)}
+                  {canExecute ? <Check className="h-4 w-4" aria-hidden="true" /> : <Clock3 className="h-4 w-4" aria-hidden="true" />}
+                  {canApprove
+                    ? draftDirty ? "Save & Approve" : "Approve"
+                    : canRetry
+                      ? draftDirty ? "Save & Retry" : "Retry Execution"
+                      : label(approval.execution_status)}
                 </button>
               </div>
             </article>

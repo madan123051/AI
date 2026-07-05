@@ -16,6 +16,20 @@ export type EmailConnectorTestConfig = {
   smtp_encryption?: unknown;
 };
 
+export type EmailSendInput = {
+  config?: EmailConnectorTestConfig;
+  to: string;
+  subject: string;
+  text: string;
+  fromName?: string;
+  replyTo?: string;
+};
+
+export type EmailSendResult = {
+  messageId: string;
+  detail: string;
+};
+
 export type EmailConnectorCheck = {
   name: string;
   ok: boolean;
@@ -74,6 +88,31 @@ function providerValue(value: unknown): EmailProvider {
 
 function encryptionValue(value: unknown, fallback: EmailEncryption): EmailEncryption {
   return textValue(value) === "starttls" ? "starttls" : fallback;
+}
+
+function emailAddressValue(value: string) {
+  return value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? "";
+}
+
+function headerValue(value: string) {
+  return value.replace(/[\r\n]+/g, " ").trim();
+}
+
+function emailAddressHeader(email: string, name?: string) {
+  const cleanEmail = emailAddressValue(email);
+  const cleanName = headerValue(name ?? "");
+
+  if (!cleanName) {
+    return `<${cleanEmail}>`;
+  }
+
+  return `"${cleanName.replace(/"/g, "'")}" <${cleanEmail}>`;
+}
+
+function dotStuff(text: string) {
+  return text
+    .replace(/\r?\n/g, "\r\n")
+    .replace(/^\./gm, "..");
 }
 
 function emailPassword() {
@@ -240,6 +279,44 @@ function okResponse(text: string) {
   return /\bOK\b/i.test(text) || /^2\d\d/m.test(text) || /^3\d\d/m.test(text);
 }
 
+async function connectAuthenticatedSmtp(config: ResolvedEmailConfig) {
+  let connection = config.smtpEncryption === "ssl_tls"
+    ? await connectTls(config.smtpHost, config.smtpPort)
+    : await connectPlain(config.smtpHost, config.smtpPort);
+  await connection.readUntil(smtpDone);
+  await connection.write("EHLO ai-control-center.local\r\n");
+  await connection.readUntil(smtpDone);
+
+  if (config.smtpEncryption === "starttls") {
+    await connection.write("STARTTLS\r\n");
+    const startTls = await connection.readUntil(smtpDone);
+    if (!okResponse(startTls)) {
+      throw new Error("SMTP STARTTLS was rejected.");
+    }
+    connection = await connectTls(config.smtpHost, config.smtpPort, connection.rawSocket());
+    await connection.write("EHLO ai-control-center.local\r\n");
+    await connection.readUntil(smtpDone);
+  }
+
+  await connection.write("AUTH LOGIN\r\n");
+  const authPrompt = await connection.readUntil(smtpDone);
+  if (!/^334/m.test(authPrompt)) {
+    throw new Error("SMTP AUTH LOGIN was not accepted.");
+  }
+  await connection.write(`${Buffer.from(config.username).toString("base64")}\r\n`);
+  const userPrompt = await connection.readUntil(smtpDone);
+  if (!/^334/m.test(userPrompt)) {
+    throw new Error("SMTP username was not accepted.");
+  }
+  await connection.write(`${Buffer.from(config.password).toString("base64")}\r\n`);
+  const login = await connection.readUntil(smtpDone);
+  if (!/^235/m.test(login)) {
+    throw new Error("SMTP login was rejected.");
+  }
+
+  return connection;
+}
+
 async function testImap(config: ResolvedEmailConfig): Promise<EmailConnectorCheck> {
   let connection: MailSocket | undefined;
 
@@ -277,44 +354,95 @@ async function testSmtp(config: ResolvedEmailConfig): Promise<EmailConnectorChec
   let connection: MailSocket | undefined;
 
   try {
-    connection = config.smtpEncryption === "ssl_tls"
-      ? await connectTls(config.smtpHost, config.smtpPort)
-      : await connectPlain(config.smtpHost, config.smtpPort);
-    await connection.readUntil(smtpDone);
-    await connection.write("EHLO ai-control-center.local\r\n");
-    await connection.readUntil(smtpDone);
-
-    if (config.smtpEncryption === "starttls") {
-      await connection.write("STARTTLS\r\n");
-      const startTls = await connection.readUntil(smtpDone);
-      if (!okResponse(startTls)) {
-        throw new Error("SMTP STARTTLS was rejected.");
-      }
-      connection = await connectTls(config.smtpHost, config.smtpPort, connection.rawSocket());
-      await connection.write("EHLO ai-control-center.local\r\n");
-      await connection.readUntil(smtpDone);
-    }
-
-    await connection.write("AUTH LOGIN\r\n");
-    const authPrompt = await connection.readUntil(smtpDone);
-    if (!/^334/m.test(authPrompt)) {
-      throw new Error("SMTP AUTH LOGIN was not accepted.");
-    }
-    await connection.write(`${Buffer.from(config.username).toString("base64")}\r\n`);
-    const userPrompt = await connection.readUntil(smtpDone);
-    if (!/^334/m.test(userPrompt)) {
-      throw new Error("SMTP username was not accepted.");
-    }
-    await connection.write(`${Buffer.from(config.password).toString("base64")}\r\n`);
-    const login = await connection.readUntil(smtpDone);
-    if (!/^235/m.test(login)) {
-      throw new Error("SMTP login was rejected.");
-    }
-
+    connection = await connectAuthenticatedSmtp(config);
     await connection.write("QUIT\r\n");
     return { name: "SMTP login", ok: true, detail: `Connected to ${config.smtpHost}:${config.smtpPort}.` };
   } catch (error) {
     return { name: "SMTP login", ok: false, detail: error instanceof Error ? error.message : "SMTP test failed." };
+  } finally {
+    connection?.close();
+  }
+}
+
+export async function sendEmail(input: EmailSendInput): Promise<EmailSendResult> {
+  const config = resolveConfig(input.config ?? {});
+  const recipient = emailAddressValue(input.to);
+  const fromAddress = emailAddressValue(config.emailAddress || config.username);
+  const subject = headerValue(input.subject || "Wildsaura reply");
+  const text = input.text.trim();
+  let connection: MailSocket | undefined;
+
+  if (config.provider !== "imap_smtp") {
+    throw new Error("Only IMAP/SMTP custom email can send messages in this phase.");
+  }
+
+  if (!fromAddress || !config.username) {
+    throw new Error("Email sender address and username are required before sending.");
+  }
+
+  if (!recipient) {
+    throw new Error("Recipient email address could not be resolved.");
+  }
+
+  if (!config.password) {
+    throw new Error("Set EMAIL_CONNECTOR_PASSWORD in server environment variables before sending.");
+  }
+
+  if (!config.smtpHost) {
+    throw new Error("SMTP host is required before sending.");
+  }
+
+  if (!text) {
+    throw new Error("Email reply text cannot be empty.");
+  }
+
+  try {
+    connection = await connectAuthenticatedSmtp(config);
+    await connection.write(`MAIL FROM:<${fromAddress}>\r\n`);
+    const mailFrom = await connection.readUntil(smtpDone);
+    if (!/^250/m.test(mailFrom)) {
+      throw new Error("SMTP server rejected the sender address.");
+    }
+
+    await connection.write(`RCPT TO:<${recipient}>\r\n`);
+    const rcptTo = await connection.readUntil(smtpDone);
+    if (!/^250/m.test(rcptTo) && !/^251/m.test(rcptTo)) {
+      throw new Error("SMTP server rejected the recipient address.");
+    }
+
+    await connection.write("DATA\r\n");
+    const dataPrompt = await connection.readUntil(smtpDone);
+    if (!/^354/m.test(dataPrompt)) {
+      throw new Error("SMTP DATA command was rejected.");
+    }
+
+    const now = new Date();
+    const messageId = `<ai-control-center-${now.getTime()}-${Math.random().toString(36).slice(2)}@wildsaura.com>`;
+    const body = [
+      `From: ${emailAddressHeader(fromAddress, input.fromName ?? "Wildsaura Team")}`,
+      `To: ${emailAddressHeader(recipient)}`,
+      `Subject: ${subject}`,
+      `Date: ${now.toUTCString()}`,
+      `Message-ID: ${messageId}`,
+      input.replyTo ? `Reply-To: ${emailAddressHeader(input.replyTo)}` : "",
+      "MIME-Version: 1.0",
+      "Content-Type: text/plain; charset=UTF-8",
+      "Content-Transfer-Encoding: 8bit",
+      "",
+      text,
+    ].filter(Boolean).join("\r\n");
+
+    await connection.write(`${dotStuff(body)}\r\n.\r\n`);
+    const queued = await connection.readUntil(smtpDone);
+    if (!/^250/m.test(queued)) {
+      throw new Error("SMTP server did not accept the message for delivery.");
+    }
+
+    await connection.write("QUIT\r\n");
+    return {
+      messageId,
+      detail: `Email sent to ${recipient} through ${config.smtpHost}:${config.smtpPort}.`,
+    };
   } finally {
     connection?.close();
   }

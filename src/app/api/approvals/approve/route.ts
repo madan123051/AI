@@ -81,6 +81,7 @@ function contentTargetId(approval: Approval) {
 async function executionResultForApproval(input: {
   approval: Approval;
   message?: Message;
+  connectors: Awaited<ReturnType<typeof loadControlCenterData>>["connectors"];
 }): Promise<ConnectorExecutionResult | undefined> {
   if (
     input.approval.connector === "website" &&
@@ -115,8 +116,12 @@ export async function POST(request: Request) {
       return errorResponse("Approval not found.", 404);
     }
 
-    if (approval.status !== "pending" || approval.execution_status !== "pending_review") {
-      return errorResponse(`Approval is not pending review. Current status: ${approval.execution_status}.`, 409);
+    const isPendingApproval = approval.status === "pending" && approval.execution_status === "pending_review";
+    const isRetryableExecution =
+      approval.status === "approved" && (approval.execution_status === "execution_pending" || approval.execution_status === "failed");
+
+    if (!isPendingApproval && !isRetryableExecution) {
+      return errorResponse(`Approval cannot be executed from current status: ${approval.execution_status}.`, 409);
     }
 
     const task = data.tasks.find((item) => item.id === approval.task_id);
@@ -142,6 +147,7 @@ export async function POST(request: Request) {
     const executionResult = await executionResultForApproval({
       approval: approvedApproval,
       message,
+      connectors: data.connectors,
     });
     const result = await approveActionInDb({
       task,

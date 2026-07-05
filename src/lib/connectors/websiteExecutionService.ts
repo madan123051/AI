@@ -1,5 +1,6 @@
 import { createSign } from "node:crypto";
-import type { Approval, ConnectorExecutionResult, Message } from "@/lib/types";
+import { sendEmail } from "@/lib/connectors/emailConnectionService";
+import type { Approval, Connector, ConnectorExecutionResult, Message } from "@/lib/types";
 
 type FirestoreField =
   | { stringValue: string }
@@ -50,6 +51,28 @@ function firstTextValue(records: Array<Record<string, unknown> | undefined>, key
   }
 
   return "";
+}
+
+function firstEmailValue(records: Array<Record<string, unknown> | undefined>, keys: string[]) {
+  for (const record of records) {
+    if (!record) {
+      continue;
+    }
+
+    for (const key of keys) {
+      const email = emailAddressValue(textValue(record[key]));
+
+      if (email) {
+        return email;
+      }
+    }
+  }
+
+  return "";
+}
+
+function emailAddressValue(value: string) {
+  return value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? "";
 }
 
 function validTargetType(value: string): WebsiteCommentTarget["targetType"] | undefined {
@@ -367,18 +390,85 @@ async function resolveWebsiteCommentTarget(approval: Approval, message?: Message
   return { originalCommentId, targetType, targetId };
 }
 
-function pendingWebsiteMessageReply(): ConnectorExecutionResult {
-  return {
-    execution_status: "execution_pending",
-    execution_error: "Approved, but website message reply execution is not implemented yet.",
-    details: "Approved, but website message reply execution is not implemented yet.",
-    log_action: "connector.website.message_reply_execution_pending",
-  };
+function subjectForReply(message?: Message) {
+  const subject = textValue(message?.subject) || "Website contact message";
+  return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
+}
+
+function resolveEmailConnector(connectors: Connector[] | undefined, message?: Message) {
+  return connectors?.find((connector) => connector.type === "email" && connector.project_id === message?.project_id) ??
+    connectors?.find((connector) => connector.type === "email");
+}
+
+async function executeWebsiteMessageReply(input: {
+  approval: Approval;
+  message?: Message;
+  connectors?: Connector[];
+}): Promise<ConnectorExecutionResult> {
+  try {
+    const draftText = input.approval.draft_text.trim();
+
+    if (!input.message) {
+      throw new Error("Cannot send website message reply because the inbox message could not be found.");
+    }
+
+    if (!draftText) {
+      throw new Error("Cannot send website message reply because draft_text is empty.");
+    }
+
+    const recipient = firstEmailValue(
+      [input.approval.metadata, input.message.metadata, { sender_handle: input.message.sender_handle, sender_name: input.message.sender_name }],
+      ["reply_to", "replyTo", "email", "sender_email", "from_email", "contact_email", "sender_handle", "sender", "sender_name"],
+    );
+
+    if (!recipient) {
+      throw new Error("Cannot send website message reply because the contact email could not be resolved.");
+    }
+
+    const emailConnector = resolveEmailConnector(input.connectors, input.message);
+
+    if (!emailConnector) {
+      throw new Error("Cannot send website message reply because no email connector is configured for this project.");
+    }
+
+    const sent = await sendEmail({
+      config: emailConnector.config,
+      to: recipient,
+      subject: subjectForReply(input.message),
+      text: draftText,
+      fromName: process.env.EMAIL_FROM_NAME ?? "Wildsaura Team",
+    });
+    const now = new Date().toISOString();
+
+    return {
+      execution_status: "executed",
+      details: sent.detail,
+      log_action: "connector.email.website_message_reply_sent",
+      metadata: {
+        email_connector_id: emailConnector.id,
+        email_message_id: sent.messageId,
+        recipient_email: recipient,
+        subject: subjectForReply(input.message),
+        source_message_id: input.message.id,
+        executed_at: now,
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Website message email reply execution failed.";
+
+    return {
+      execution_status: "failed",
+      execution_error: message,
+      details: message,
+      log_action: "connector.email.website_message_reply_failed",
+    };
+  }
 }
 
 export async function executeWebsiteApproval(input: {
   approval: Approval;
   message?: Message;
+  connectors?: Connector[];
 }): Promise<ConnectorExecutionResult> {
   if (input.approval.connector !== "website") {
     return {
@@ -390,7 +480,7 @@ export async function executeWebsiteApproval(input: {
   }
 
   if (input.approval.action_type === "reply_message") {
-    return pendingWebsiteMessageReply();
+    return executeWebsiteMessageReply(input);
   }
 
   if (input.approval.action_type !== "reply_comment") {
