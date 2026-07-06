@@ -26,6 +26,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  UploadCloud,
   Users,
   Workflow,
   X,
@@ -39,6 +40,7 @@ export type AppView =
   | "ai-brain"
   | "content"
   | "media"
+  | "publisher"
   | "rules"
   | "approvals"
   | "memory"
@@ -69,6 +71,7 @@ const navItems: Array<{ href: string; label: string; view: AppView; icon: typeof
   { href: "/ai-brain", label: "AI Brain", view: "ai-brain", icon: BrainCircuit },
   { href: "/content", label: "Content", view: "content", icon: CalendarDays },
   { href: "/media", label: "Media", view: "media", icon: ImageIcon },
+  { href: "/publisher", label: "Publisher", view: "publisher", icon: UploadCloud },
   { href: "/rules", label: "Rules", view: "rules", icon: ShieldCheck },
   { href: "/approvals", label: "Approvals", view: "approvals", icon: CheckSquare },
   { href: "/memory", label: "Memory", view: "memory", icon: Sparkles },

@@ -213,7 +213,7 @@ alter table public.approvals drop constraint if exists approvals_action_type_che
 alter table public.approvals add constraint approvals_action_type_check check (action_type in ('reply_comment', 'reply_message', 'send_email', 'publish_content', 'update_content'));
 
 alter table public.approvals drop constraint if exists approvals_connector_check;
-alter table public.approvals add constraint approvals_connector_check check (connector in ('website', 'email', 'instagram', 'facebook'));
+alter table public.approvals add constraint approvals_connector_check check (connector in ('website', 'email', 'instagram', 'facebook', 'tiktok'));
 
 alter table public.approvals drop constraint if exists approvals_execution_status_check;
 alter table public.approvals add constraint approvals_execution_status_check check (execution_status in ('pending_review', 'approved', 'executing', 'executed', 'failed', 'execution_pending'));
@@ -277,7 +277,7 @@ alter table public.connectors add column if not exists updated_at timestamptz no
 alter table public.connectors drop column if exists owner_id;
 
 alter table public.connectors drop constraint if exists connectors_type_check;
-alter table public.connectors add constraint connectors_type_check check (type in ('email', 'gmail', 'instagram', 'facebook', 'website', 'viber', 'storage'));
+alter table public.connectors add constraint connectors_type_check check (type in ('email', 'gmail', 'instagram', 'facebook', 'tiktok', 'website', 'viber', 'storage'));
 
 alter table public.connectors drop constraint if exists connectors_status_check;
 alter table public.connectors add constraint connectors_status_check check (status in ('not_connected', 'not_configured', 'configured', 'test_pending', 'connected', 'error', 'paused'));
@@ -409,7 +409,7 @@ alter table public.content_items drop column if exists owner_id;
 alter table public.content_items drop constraint if exists content_items_type_check;
 alter table public.content_items drop constraint if exists content_items_status_check;
 alter table public.content_items add constraint content_items_type_check check (content_type in ('post', 'story', 'website_page', 'blog', 'reel'));
-alter table public.content_items add constraint content_items_status_check check (status in ('draft', 'scheduled', 'approval_required', 'published', 'failed'));
+alter table public.content_items add constraint content_items_status_check check (status in ('draft', 'scheduled', 'approval_required', 'approved', 'published', 'failed'));
 
 create table if not exists public.content_routes (
   id uuid primary key default gen_random_uuid(),
@@ -431,8 +431,8 @@ alter table public.content_routes add column if not exists created_at timestampt
 alter table public.content_routes drop column if exists owner_id;
 alter table public.content_routes drop constraint if exists content_routes_platform_check;
 alter table public.content_routes drop constraint if exists content_routes_status_check;
-alter table public.content_routes add constraint content_routes_platform_check check (platform in ('website', 'instagram', 'facebook'));
-alter table public.content_routes add constraint content_routes_status_check check (status in ('draft', 'scheduled', 'approval_required', 'published', 'failed'));
+alter table public.content_routes add constraint content_routes_platform_check check (platform in ('website', 'instagram', 'facebook', 'tiktok'));
+alter table public.content_routes add constraint content_routes_status_check check (status in ('draft', 'scheduled', 'approval_required', 'approved', 'published', 'failed'));
 
 create table if not exists public.content_schedule (
   id uuid primary key default gen_random_uuid(),
@@ -451,7 +451,7 @@ alter table public.content_schedule add column if not exists created_at timestam
 alter table public.content_schedule add column if not exists updated_at timestamptz not null default now();
 alter table public.content_schedule drop column if exists owner_id;
 alter table public.content_schedule drop constraint if exists content_schedule_status_check;
-alter table public.content_schedule add constraint content_schedule_status_check check (status in ('draft', 'scheduled', 'approval_required', 'published', 'failed'));
+alter table public.content_schedule add constraint content_schedule_status_check check (status in ('draft', 'scheduled', 'approval_required', 'approved', 'published', 'failed'));
 
 create table if not exists public.publish_logs (
   id uuid primary key default gen_random_uuid(),
@@ -473,7 +473,7 @@ alter table public.publish_logs add column if not exists details text not null d
 alter table public.publish_logs add column if not exists created_at timestamptz not null default now();
 alter table public.publish_logs drop column if exists owner_id;
 alter table public.publish_logs drop constraint if exists publish_logs_status_check;
-alter table public.publish_logs add constraint publish_logs_status_check check (status in ('draft', 'scheduled', 'approval_required', 'published', 'failed', 'blocked'));
+alter table public.publish_logs add constraint publish_logs_status_check check (status in ('draft', 'scheduled', 'approval_required', 'approved', 'published', 'failed', 'blocked'));
 
 create table if not exists public.media_assets (
   id uuid primary key default gen_random_uuid(),

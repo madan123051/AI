@@ -16,6 +16,11 @@ import { HandoffPanel } from "@/components/HandoffPanel";
 import { InboxPanel } from "@/components/InboxPanel";
 import { MediaLibraryPanel } from "@/components/MediaLibraryPanel";
 import { ProjectMemoryPanel } from "@/components/ProjectMemoryPanel";
+import {
+  PublisherDashboardPanel,
+  type PublisherBulkAssetInput,
+  type PublisherPlanRequest,
+} from "@/components/PublisherDashboardPanel";
 import { RulesPanel } from "@/components/RulesPanel";
 import { TaskCard } from "@/components/TaskCard";
 import {
@@ -28,6 +33,7 @@ import {
   createProjectInDb,
   createTaskInDb,
   createTaskFromMessageInDb,
+  deleteMediaAssetInDb,
   deleteProjectInDb,
   deleteProjectTaskHistoryInDb,
   deleteTaskHistoryInDb,
@@ -39,6 +45,9 @@ import {
   persistGeneratedHandoff,
   persistTaskTransition,
   requestReplyApprovalForMessageInDb,
+  createPublisherPlanInDb,
+  runPublisherMediaAiActionInDb,
+  type PublisherMediaAiAction,
   runAutomationRuleNowInDb,
   runContentAiActionInDb,
   updateAutomationRuleStatusInDb,
@@ -114,6 +123,7 @@ const viewConfig: Record<AppView, { title: string; subtitle: string }> = {
   "ai-brain": { title: "AI Brain", subtitle: "Handoff and model control" },
   content: { title: "Content", subtitle: "Calendar and routing" },
   media: { title: "Media", subtitle: "Asset library and routing" },
+  publisher: { title: "Publisher", subtitle: "Omni media planning and queue" },
   rules: { title: "Rules", subtitle: "Safe / review / blocked actions" },
   approvals: { title: "Approvals", subtitle: "Human review queue" },
   memory: { title: "Memory", subtitle: "Project brand context" },
@@ -1018,6 +1028,191 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         ...current,
         media_assets: current.media_assets.map((item) => (item.id === assetId ? result.asset : item)),
         action_logs: [result.log, ...current.action_logs],
+      }));
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDeleteMediaAsset(assetId: string) {
+    const asset = data.media_assets.find((item) => item.id === assetId);
+
+    if (!asset) {
+      return;
+    }
+
+    setIsSaving(true);
+    setLoadError("");
+
+    try {
+      const result = await deleteMediaAssetInDb(asset);
+      const contentItemIdSet = new Set(result.contentItemIds);
+      const approvalIdSet = new Set(result.approvalIds);
+      const taskIdSet = new Set(result.taskIds);
+
+      setData((current) => ({
+        ...current,
+        media_assets: current.media_assets.filter((item) => item.id !== result.assetId),
+        content_items: current.content_items.filter((item) => !contentItemIdSet.has(item.id)),
+        content_routes: current.content_routes.filter((route) => !contentItemIdSet.has(route.content_item_id)),
+        content_schedule: current.content_schedule.filter((schedule) => !contentItemIdSet.has(schedule.content_item_id)),
+        publish_logs: current.publish_logs.filter((log) => !contentItemIdSet.has(log.content_item_id)),
+        approvals: current.approvals.filter((approval) => !approvalIdSet.has(approval.id)),
+        tasks: current.tasks.filter((task) => !taskIdSet.has(task.id)),
+        task_states: Object.fromEntries(
+          Object.entries(current.task_states).filter(([taskId]) => !taskIdSet.has(taskId)),
+        ),
+        action_logs: [result.log, ...current.action_logs.filter((log) => !log.task_id || !taskIdSet.has(log.task_id))],
+      }));
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleBulkCreatePublisherAssets(inputs: PublisherBulkAssetInput[]) {
+    if (inputs.length === 0) {
+      return;
+    }
+
+    setIsSaving(true);
+    setLoadError("");
+
+    try {
+      const results: Array<Awaited<ReturnType<typeof createMediaAssetInDb>>> = [];
+
+      for (const input of inputs) {
+        results.push(await createMediaAssetInDb(input));
+      }
+
+      setData((current) => ({
+        ...current,
+        media_assets: [...results.map((result) => result.asset), ...current.media_assets],
+        action_logs: [...results.map((result) => result.log), ...current.action_logs],
+      }));
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handlePublisherMediaAiAction(assetIds: string[], action: PublisherMediaAiAction) {
+    const selectedAssets = assetIds
+      .map((assetId) => data.media_assets.find((asset) => asset.id === assetId))
+      .filter((asset): asset is (typeof data.media_assets)[number] => Boolean(asset));
+
+    if (selectedAssets.length === 0) {
+      return;
+    }
+
+    setIsSaving(true);
+    setLoadError("");
+
+    try {
+      const results: Array<Awaited<ReturnType<typeof runPublisherMediaAiActionInDb>>> = [];
+
+      for (const asset of selectedAssets) {
+        results.push(
+          await runPublisherMediaAiActionInDb({
+            asset,
+            action,
+            memory: data.project_memory[asset.project_id],
+          }),
+        );
+      }
+
+      const assetMap = new Map(results.map((result) => [result.asset.id, result.asset]));
+
+      setData((current) => ({
+        ...current,
+        media_assets: current.media_assets.map((asset) => assetMap.get(asset.id) ?? asset),
+        action_logs: [...results.map((result) => result.log), ...current.action_logs],
+      }));
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleCreatePublisherPlans(plans: PublisherPlanRequest[]) {
+    if (plans.length === 0) {
+      return;
+    }
+
+    setIsSaving(true);
+    setLoadError("");
+
+    try {
+      const results: Array<Awaited<ReturnType<typeof createPublisherPlanInDb>>> = [];
+
+      for (const plan of plans) {
+        const asset = data.media_assets.find((item) => item.id === plan.assetId);
+
+        if (!asset) {
+          continue;
+        }
+
+        results.push(
+          await createPublisherPlanInDb({
+            asset,
+            title: plan.title,
+            caption_body: plan.caption_body,
+            content_type: plan.content_type,
+            routes: plan.routes,
+            scheduled_for: plan.scheduled_for,
+            timezone: plan.timezone,
+            status: plan.status,
+            requiresApproval: plan.requiresApproval,
+            rules: data.rules,
+          }),
+        );
+      }
+
+      if (results.length === 0) {
+        return;
+      }
+
+      const assetMap = new Map(results.map((result) => [result.asset.id, result.asset]));
+      const newItems = results.map((result) => result.item);
+      const newItemIds = new Set(newItems.map((item) => item.id));
+      const newRoutes = results.flatMap((result) => result.routes);
+      const newRouteIds = new Set(newRoutes.map((route) => route.id));
+      const newSchedules = results.map((result) => result.schedule).filter((schedule): schedule is NonNullable<typeof schedule> => Boolean(schedule));
+      const newScheduleIds = new Set(newSchedules.map((schedule) => schedule.id));
+      const newTasks = results.map((result) => result.task).filter((task): task is NonNullable<typeof task> => Boolean(task));
+      const newApprovals = results.map((result) => result.approval).filter((approval): approval is NonNullable<typeof approval> => Boolean(approval));
+      const newLogs = results.flatMap((result) => [result.log, result.approvalLog].filter((log): log is NonNullable<typeof log> => Boolean(log)));
+
+      setData((current) => ({
+        ...current,
+        media_assets: current.media_assets.map((asset) => assetMap.get(asset.id) ?? asset),
+        content_items: [...newItems, ...current.content_items.filter((item) => !newItemIds.has(item.id))],
+        content_routes: [...newRoutes, ...current.content_routes.filter((route) => !newRouteIds.has(route.id))],
+        content_schedule: [...newSchedules, ...current.content_schedule.filter((schedule) => !newScheduleIds.has(schedule.id))],
+        tasks: [
+          ...newTasks,
+          ...current.tasks.filter((task) => !newTasks.some((newTask) => newTask.id === task.id)),
+        ],
+        task_states: results.reduce(
+          (states, result) =>
+            result.task && result.state
+              ? {
+                  ...states,
+                  [result.task.id]: result.state,
+                }
+              : states,
+          current.task_states,
+        ),
+        approvals: [
+          ...newApprovals,
+          ...current.approvals.filter((approval) => !newApprovals.some((newApproval) => newApproval.id === approval.id)),
+        ],
+        action_logs: [...newLogs, ...current.action_logs],
       }));
     } catch (error) {
       setLoadError(getErrorMessage(error));
@@ -2312,6 +2507,27 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         isSaving={isSaving}
         onCreateAsset={handleCreateMediaAsset}
         onUpdateStatus={handleUpdateMediaAssetStatus}
+      />,
+    );
+  }
+
+  if (view === "publisher") {
+    return renderShell(
+      <PublisherDashboardPanel
+        project={selectedProject}
+        memory={selectedProjectMemory}
+        assets={selectedProjectMediaAssets}
+        items={selectedProjectContentItems}
+        routes={selectedProjectContentRoutes}
+        schedules={selectedProjectContentSchedule}
+        publishLogs={selectedProjectPublishLogs}
+        approvals={data.approvals}
+        isSaving={isSaving}
+        onBulkCreateAssets={handleBulkCreatePublisherAssets}
+        onMediaAiAction={handlePublisherMediaAiAction}
+        onCreatePlans={handleCreatePublisherPlans}
+        onRetryPublish={handleMockPublishContent}
+        onDeleteAsset={handleDeleteMediaAsset}
       />,
     );
   }

@@ -532,7 +532,7 @@ function normalizeAutomationRule(row: AutomationRuleRow): AutomationRule {
 }
 
 function isMessageSource(value: unknown): value is MessageSource {
-  return value === "gmail" || value === "website" || value === "instagram" || value === "facebook" || value === "viber";
+  return value === "gmail" || value === "website" || value === "instagram" || value === "facebook" || value === "tiktok" || value === "viber";
 }
 
 function isMessageStatus(value: unknown): value is MessageStatus {
@@ -590,11 +590,11 @@ function isContentType(value: unknown): value is ContentType {
 }
 
 function isContentPlatform(value: unknown): value is ContentPlatform {
-  return value === "website" || value === "instagram" || value === "facebook";
+  return value === "website" || value === "instagram" || value === "facebook" || value === "tiktok";
 }
 
 function isContentStatus(value: unknown): value is ContentStatus {
-  return value === "draft" || value === "scheduled" || value === "approval_required" || value === "published" || value === "failed";
+  return value === "draft" || value === "scheduled" || value === "approval_required" || value === "approved" || value === "published" || value === "failed";
 }
 
 function normalizeContentStatus(value: unknown): ContentStatus {
@@ -610,6 +610,9 @@ function normalizeContentStatus(value: unknown): ContentStatus {
 }
 
 function normalizeContentItem(row: ContentItemRow): ContentItem {
+  const metadata = row.metadata ?? {};
+  const workflowStatus = metadataString(metadata, "workflow_status");
+
   return {
     id: row.id,
     project_id: row.project_id,
@@ -618,46 +621,60 @@ function normalizeContentItem(row: ContentItemRow): ContentItem {
     content_type: isContentType(row.content_type) ? row.content_type : "post",
     caption_body: row.caption_body ?? "",
     media_placeholder: row.media_placeholder ?? "",
-    status: normalizeContentStatus(row.status),
-    metadata: row.metadata ?? {},
+    status: isContentStatus(workflowStatus) ? workflowStatus : normalizeContentStatus(row.status),
+    metadata,
     created_at: row.created_at,
     updated_at: row.updated_at ?? row.created_at,
   };
 }
 
 function normalizeContentRoute(row: ContentRouteRow): ContentRoute {
+  const metadata = row.metadata ?? {};
+  const actualPlatform = metadataString(metadata, "actual_platform");
+  const workflowStatus = metadataString(metadata, "workflow_status");
+
   return {
     id: row.id,
     content_item_id: row.content_item_id,
-    platform: isContentPlatform(row.platform) ? row.platform : "website",
+    platform: isContentPlatform(actualPlatform) ? actualPlatform : isContentPlatform(row.platform) ? row.platform : "website",
     target_route: row.target_route ?? "",
     route_label: row.route_label ?? row.target_route ?? "",
-    status: normalizeContentStatus(row.status),
-    metadata: row.metadata ?? {},
+    status: isContentStatus(workflowStatus) ? workflowStatus : normalizeContentStatus(row.status),
+    metadata,
     created_at: row.created_at,
   };
 }
 
 function normalizeContentSchedule(row: ContentScheduleRow): ContentSchedule {
+  const metadata = "metadata" in row && row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+    ? (row.metadata as Record<string, unknown>)
+    : undefined;
+  const workflowStatus = metadataString(metadata, "workflow_status");
+
   return {
     id: row.id,
     content_item_id: row.content_item_id,
     scheduled_for: row.scheduled_for ?? undefined,
     timezone: row.timezone ?? "local",
-    status: normalizeContentStatus(row.status),
+    status: isContentStatus(workflowStatus) ? workflowStatus : normalizeContentStatus(row.status),
     created_at: row.created_at,
     updated_at: row.updated_at ?? row.created_at,
   };
 }
 
 function normalizePublishLog(row: PublishLogRow): PublishLog {
+  const metadata = "metadata" in row && row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+    ? (row.metadata as Record<string, unknown>)
+    : undefined;
+  const workflowStatus = metadataString(metadata, "workflow_status");
+
   return {
     id: row.id,
     project_id: row.project_id,
     content_item_id: row.content_item_id,
     route_id: row.route_id ?? undefined,
     action: row.action,
-    status: row.status === "blocked" ? "blocked" : normalizeContentStatus(row.status),
+    status: row.status === "blocked" ? "blocked" : isContentStatus(workflowStatus) ? workflowStatus : normalizeContentStatus(row.status),
     details: row.details ?? "",
     created_at: row.created_at,
   };
@@ -714,6 +731,25 @@ function isLegacyMediaStatusError(error: SupabaseLikeError) {
   return Boolean(error?.code === "23514" || error?.message.includes("media_assets_status_check"));
 }
 
+function legacyContentStatus(status: ContentStatus) {
+  return status === "approved" ? "approval_required" : status;
+}
+
+function legacyContentPlatform(platform: ContentPlatform) {
+  return platform === "tiktok" ? "facebook" : platform;
+}
+
+function isLegacyContentConstraintError(error: SupabaseLikeError) {
+  return Boolean(
+    error?.code === "23514" ||
+      error?.message.includes("content_items_status_check") ||
+      error?.message.includes("content_routes_platform_check") ||
+      error?.message.includes("content_routes_status_check") ||
+      error?.message.includes("content_schedule_status_check") ||
+      error?.message.includes("publish_logs_status_check"),
+  );
+}
+
 function normalizeMediaAsset(row: MediaAssetRow): MediaAsset {
   const metadata = row.metadata ?? {};
   const linkedCollection = metadataString(metadata, "linked_collection");
@@ -743,6 +779,10 @@ function defaultRouteForPlatform(platform: ContentPlatform, contentType: Content
     return route.trim() || "/content/draft";
   }
 
+  if (platform === "tiktok") {
+    return "tiktok video";
+  }
+
   if (contentType === "story") {
     return `${platform} story`;
   }
@@ -763,7 +803,11 @@ function labelForContentPlatform(platform: ContentPlatform) {
     return "Instagram";
   }
 
-  return "Facebook";
+  if (platform === "facebook") {
+    return "Facebook";
+  }
+
+  return "TikTok";
 }
 
 function legacyStatusFromMessageStatus(status: MessageStatus) {
@@ -810,7 +854,7 @@ function approvalActionTypeForMessage(message: Message): ApprovalActionType {
     return "send_email";
   }
 
-  if (isCommentLikeTarget(eventType) || message.source === "instagram" || message.source === "facebook") {
+  if (isCommentLikeTarget(eventType) || message.source === "instagram" || message.source === "facebook" || message.source === "tiktok") {
     return "reply_comment";
   }
 
@@ -828,8 +872,8 @@ function approvalTargetTypeForMessage(message: Message) {
 }
 
 function connectorForContentRoutes(routes: ContentRoute[]): ApprovalConnector {
-  const route = routes.find((item) => item.platform === "instagram" || item.platform === "facebook" || item.platform === "website");
-  return route?.platform === "instagram" || route?.platform === "facebook" ? route.platform : "website";
+  const route = routes.find((item) => item.platform === "instagram" || item.platform === "facebook" || item.platform === "tiktok" || item.platform === "website");
+  return route?.platform === "instagram" || route?.platform === "facebook" || route?.platform === "tiktok" ? route.platform : "website";
 }
 
 async function updateMessageWithFallback(
@@ -1020,7 +1064,7 @@ function isApprovalActionType(value: unknown): value is ApprovalActionType {
 }
 
 function isApprovalConnector(value: unknown): value is ApprovalConnector {
-  return value === "website" || value === "email" || value === "instagram" || value === "facebook";
+  return value === "website" || value === "email" || value === "instagram" || value === "facebook" || value === "tiktok";
 }
 
 function isApprovalExecutionStatus(value: unknown): value is ApprovalExecutionStatus {
@@ -2627,24 +2671,35 @@ export async function createContentItemInDb(input: {
       : "failed";
   const routePlatforms = input.target_platforms.length > 0 ? input.target_platforms : (["website"] as ContentPlatform[]);
 
-  const itemResult = await supabase
+  const itemPayload = (databaseStatus: ContentStatus) => ({
+    project_id: input.projectId,
+    title: input.title.trim(),
+    content_type: input.content_type,
+    caption_body: input.caption_body.trim(),
+    media_placeholder: input.media_placeholder.trim(),
+    status: databaseStatus,
+    metadata: {
+      rule_decision: publishDecision?.reason ?? draftDecision?.reason ?? "Draft captured.",
+      target_platforms: routePlatforms,
+      workflow_status: status,
+      publisher_ready: true,
+    },
+    created_at: now,
+    updated_at: now,
+  });
+  let itemResult = await supabase
     .from("content_items")
-    .insert({
-      project_id: input.projectId,
-      title: input.title.trim(),
-      content_type: input.content_type,
-      caption_body: input.caption_body.trim(),
-      media_placeholder: input.media_placeholder.trim(),
-      status,
-      metadata: {
-        rule_decision: publishDecision?.reason ?? draftDecision?.reason ?? "Draft captured.",
-        target_platforms: routePlatforms,
-      },
-      created_at: now,
-      updated_at: now,
-    })
+    .insert(itemPayload(status))
     .select("*")
     .single();
+
+  if (isLegacyContentConstraintError(itemResult.error)) {
+    itemResult = await supabase
+      .from("content_items")
+      .insert(itemPayload(legacyContentStatus(status)))
+      .select("*")
+      .single();
+  }
 
   if (isMissingTable(itemResult.error)) {
     throw new Error("Content calendar tables are missing. Run database/schema.sql in Supabase SQL editor, then press Reload.");
@@ -2662,18 +2717,31 @@ export async function createContentItemInDb(input: {
       target_route: route,
       route_label: `${labelForContentPlatform(platform)} - ${route}`,
       status: item.status,
-      metadata: {},
+      metadata: {
+        actual_platform: platform,
+        workflow_status: item.status,
+      },
       created_at: now,
     };
   });
-  const routesResult = await supabase.from("content_routes").insert(routeRows).select("*");
+  const legacyRouteRows = routeRows.map((row) => ({
+    ...row,
+    platform: legacyContentPlatform(row.platform),
+    status: legacyContentStatus(row.status),
+  }));
+  let routesResult = await supabase.from("content_routes").insert(routeRows).select("*");
+
+  if (isLegacyContentConstraintError(routesResult.error)) {
+    routesResult = await supabase.from("content_routes").insert(legacyRouteRows).select("*");
+  }
+
   throwIfError("Create content routes", routesResult.error);
   const routes = ((routesResult.data ?? []) as ContentRouteRow[]).map(normalizeContentRoute);
 
   let schedule: ContentSchedule | undefined;
 
   if (input.scheduled_for || item.status === "scheduled") {
-    const scheduleResult = await supabase
+    let scheduleResult = await supabase
       .from("content_schedule")
       .insert({
         content_item_id: item.id,
@@ -2685,6 +2753,21 @@ export async function createContentItemInDb(input: {
       })
       .select("*")
       .single();
+
+    if (isLegacyContentConstraintError(scheduleResult.error)) {
+      scheduleResult = await supabase
+        .from("content_schedule")
+        .insert({
+          content_item_id: item.id,
+          scheduled_for: input.scheduled_for ?? null,
+          timezone: "local",
+          status: legacyContentStatus(item.status),
+          created_at: now,
+          updated_at: now,
+        })
+        .select("*")
+        .single();
+    }
 
     throwIfError("Create content schedule", scheduleResult.error);
     schedule = normalizeContentSchedule(scheduleResult.data as ContentScheduleRow);
@@ -2802,6 +2885,21 @@ export async function runContentAiActionInDb(input: {
     metadata.ai_story_text = storyText;
     metadata.ai_story_text_generated_at = now;
     details = `Generated short story text for ${input.item.title}.`;
+  }
+
+  if (input.action === "generate_short_post") {
+    const shortPost = `${input.item.title}: a compact Wildsaura field note ready for social posting.`;
+    captionBody = `${captionBody ? `${captionBody}\n\n` : ""}${shortPost}`;
+    metadata.ai_short_post = shortPost;
+    metadata.ai_short_post_generated_at = now;
+    details = `Generated short post for ${input.item.title}.`;
+  }
+
+  if (input.action === "generate_alt_text") {
+    const altText = `Wildsaura media for ${input.item.title}, prepared with ${brandTone.toLowerCase()} detail.`;
+    metadata.ai_alt_text = altText;
+    metadata.ai_alt_text_generated_at = now;
+    details = `Generated alt text for ${input.item.title}.`;
   }
 
   metadata.last_ai_action = input.action;
@@ -3218,6 +3316,392 @@ export async function updateMediaAssetStatusInDb(asset: MediaAsset, status: Medi
     });
 
   return { asset: updatedAsset, log };
+}
+
+export async function deleteMediaAssetInDb(asset: MediaAsset) {
+  assertSupabaseReady();
+  const supabase = getSupabaseClient();
+  const now = new Date().toISOString();
+  const contentItemsResult = await supabase.from("content_items").select("*").eq("project_id", asset.project_id);
+
+  throwUnlessMissingTable("Load linked publisher content items", contentItemsResult.error);
+  const linkedContentItems = isMissingTable(contentItemsResult.error)
+    ? []
+    : ((contentItemsResult.data ?? []) as ContentItemRow[])
+        .map(normalizeContentItem)
+        .filter((item) => item.id === asset.content_item_id || metadataString(item.metadata, "media_asset_id") === asset.id);
+  const deletableContentItems = linkedContentItems.filter((item) => item.status !== "published" && item.status !== "approved");
+  const contentItemIds = deletableContentItems.map((item) => item.id);
+  let approvalIds: string[] = [];
+  let taskIds: string[] = [];
+
+  if (contentItemIds.length > 0) {
+    const approvalsResult = await supabase.from("approvals").select("id, task_id").in("target_id", contentItemIds);
+
+    throwUnlessMissingTable("Load linked publisher approvals", approvalsResult.error);
+    approvalIds = isMissingTable(approvalsResult.error)
+      ? []
+      : ((approvalsResult.data ?? []) as Array<{ id: string; task_id?: string | null }>).map((approval) => approval.id);
+    taskIds = isMissingTable(approvalsResult.error)
+      ? []
+      : Array.from(
+          new Set(
+            ((approvalsResult.data ?? []) as Array<{ task_id?: string | null }>)
+              .map((approval) => approval.task_id)
+              .filter((taskId): taskId is string => Boolean(taskId)),
+          ),
+        );
+
+    await deleteIn(supabase, "publish_logs", "content_item_id", contentItemIds, "Delete linked publisher publish logs");
+    await deleteIn(supabase, "content_schedule", "content_item_id", contentItemIds, "Delete linked publisher schedules");
+    await deleteIn(supabase, "content_routes", "content_item_id", contentItemIds, "Delete linked publisher routes");
+    await deleteIn(supabase, "approvals", "id", approvalIds, "Delete linked publisher approvals");
+    await deleteIn(supabase, "task_states", "task_id", taskIds, "Delete linked publisher task states");
+    await deleteIn(supabase, "action_logs", "task_id", taskIds, "Delete linked publisher task logs");
+    await deleteIn(supabase, "tasks", "id", taskIds, "Delete linked publisher approval tasks");
+    await deleteIn(supabase, "content_items", "id", contentItemIds, "Delete linked publisher content items");
+  }
+
+  const deleteResult = await supabase.from("media_assets").delete().eq("id", asset.id).select("id");
+
+  if (isMissingTable(deleteResult.error)) {
+    throw new Error("Media library table is missing. Run database/schema.sql in Supabase SQL editor, then press Reload.");
+  }
+
+  throwIfError("Delete media asset", deleteResult.error);
+
+  if ((deleteResult.data ?? []).length === 0) {
+    throw new Error("Media asset was not deleted. Run database/schema.sql in Supabase SQL editor to add media delete policies, then press Reload.");
+  }
+
+  const details = contentItemIds.length > 0
+    ? `Removed media asset ${asset.title} and ${contentItemIds.length} linked unpublished publisher item(s).`
+    : `Removed media asset: ${asset.title}.`;
+  const log =
+    (await insertActionLog(supabase, {
+      project_id: asset.project_id,
+      actor: "User",
+      action: "media.deleted",
+      details,
+      created_at: now,
+    })) ??
+    localLog({
+      project_id: asset.project_id,
+      actor: "User",
+      action: "media.deleted",
+      details,
+      created_at: now,
+    });
+
+  return {
+    assetId: asset.id,
+    projectId: asset.project_id,
+    contentItemIds,
+    approvalIds,
+    taskIds,
+    log,
+  };
+}
+
+export type PublisherMediaAiAction =
+  | "generate_caption"
+  | "generate_hashtags"
+  | "generate_website_title"
+  | "generate_story_text"
+  | "generate_short_post"
+  | "generate_alt_text";
+
+export async function runPublisherMediaAiActionInDb(input: {
+  asset: MediaAsset;
+  action: PublisherMediaAiAction;
+  memory?: ProjectMemory;
+}) {
+  assertSupabaseReady();
+  const supabase = getSupabaseClient();
+  const now = new Date().toISOString();
+  const brandTone = input.memory?.brand_tone || "Nature documentary";
+  const metadata = { ...input.asset.metadata };
+  let title = input.asset.title;
+  let altText = input.asset.alt_text;
+  let tags = input.asset.tags;
+  let details = "";
+
+  if (input.action === "generate_caption") {
+    metadata.ai_caption = `${input.asset.title}: a ${brandTone.toLowerCase()} Wildsaura caption for website and social routes.`;
+    metadata.ai_caption_generated_at = now;
+    details = `Generated caption for ${input.asset.title}.`;
+  }
+
+  if (input.action === "generate_hashtags") {
+    const generatedTags = ["Wildsaura", "Wildlife", "MacroPhotography", "NatureStory", "CreatorWorkflow"];
+    tags = Array.from(new Set([...input.asset.tags, ...generatedTags]));
+    metadata.ai_hashtags = generatedTags.map((tag) => `#${tag}`);
+    metadata.ai_hashtags_generated_at = now;
+    details = `Generated hashtags for ${input.asset.title}.`;
+  }
+
+  if (input.action === "generate_website_title") {
+    title = `${input.asset.title.replace(/\s+\|\s+Wildsaura$/i, "")} | Wildsaura`;
+    metadata.ai_website_title_generated_at = now;
+    details = `Generated website title for ${input.asset.title}.`;
+  }
+
+  if (input.action === "generate_story_text") {
+    metadata.ai_story_text = `${input.asset.title}. A field-note moment with one detail worth slowing down for.`;
+    metadata.ai_story_text_generated_at = now;
+    details = `Generated story text for ${input.asset.title}.`;
+  }
+
+  if (input.action === "generate_short_post") {
+    metadata.ai_short_post = `${input.asset.title}: a quick Wildsaura post ready for review.`;
+    metadata.ai_short_post_generated_at = now;
+    details = `Generated short post for ${input.asset.title}.`;
+  }
+
+  if (input.action === "generate_alt_text") {
+    altText = `${input.asset.title}, documented in Wildsaura's ${brandTone.toLowerCase()} style.`;
+    metadata.ai_alt_text_generated_at = now;
+    details = `Generated alt text for ${input.asset.title}.`;
+  }
+
+  metadata.last_ai_action = input.action;
+  metadata.ai_requires_review = true;
+
+  const assetResult = await supabase
+    .from("media_assets")
+    .update({
+      title,
+      alt_text: altText,
+      tags,
+      metadata,
+      updated_at: now,
+    })
+    .eq("id", input.asset.id)
+    .select("*")
+    .single();
+
+  throwIfError("Run publisher media AI action", assetResult.error);
+  const asset = normalizeMediaAsset(assetResult.data as MediaAssetRow);
+  const log =
+    (await insertActionLog(supabase, {
+      project_id: asset.project_id,
+      actor: "Mock AI",
+      action: `publisher.ai.${input.action}`,
+      details,
+      created_at: now,
+    })) ??
+    localLog({
+      project_id: asset.project_id,
+      actor: "Mock AI",
+      action: `publisher.ai.${input.action}`,
+      details,
+      created_at: now,
+    });
+
+  return { asset, log };
+}
+
+export async function createPublisherPlanInDb(input: {
+  asset: MediaAsset;
+  title: string;
+  caption_body: string;
+  content_type: ContentType;
+  routes: Array<{
+    platform: ContentPlatform;
+    target_route: string;
+    route_label: string;
+    target_kind: string;
+  }>;
+  scheduled_for?: string;
+  timezone: string;
+  status: ContentStatus;
+  requiresApproval: boolean;
+  rules: Rule[];
+}) {
+  assertSupabaseReady();
+  const supabase = getSupabaseClient();
+  const now = new Date().toISOString();
+  const routeInputs = input.routes.length > 0
+    ? input.routes
+    : [{ platform: "website" as const, target_route: "/gallery", route_label: "Wildsaura website photo", target_kind: "website_photo" }];
+  const requestedStatus: ContentStatus = input.requiresApproval ? "approval_required" : input.status;
+  const itemPayload = (databaseStatus: ContentStatus) => ({
+    project_id: input.asset.project_id,
+    title: input.title.trim() || input.asset.title,
+    content_type: input.content_type,
+    caption_body: input.caption_body.trim(),
+    media_placeholder: input.asset.source_url || input.asset.storage_path || input.asset.title,
+    status: databaseStatus,
+    metadata: {
+      source: "omni_media_publisher",
+      media_asset_id: input.asset.id,
+      media_asset_type: input.asset.asset_type,
+      workflow_status: requestedStatus,
+      ai_requires_review: Boolean(
+        input.asset.metadata.ai_caption ||
+          input.asset.metadata.ai_story_text ||
+          input.asset.metadata.ai_short_post ||
+          input.asset.metadata.ai_hashtags ||
+          input.asset.metadata.ai_alt_text_generated_at,
+      ),
+      target_platforms: routeInputs.map((route) => route.platform),
+      publisher_routes: routeInputs,
+      publish_mode: input.scheduled_for ? "scheduled" : "publish_now_requires_review",
+      storage_ready: false,
+    },
+    created_at: now,
+    updated_at: now,
+  });
+  let itemResult = await supabase.from("content_items").insert(itemPayload(requestedStatus)).select("*").single();
+
+  if (isLegacyContentConstraintError(itemResult.error)) {
+    itemResult = await supabase.from("content_items").insert(itemPayload(legacyContentStatus(requestedStatus))).select("*").single();
+  }
+
+  throwIfError("Create publisher content item", itemResult.error);
+  const item = normalizeContentItem(itemResult.data as ContentItemRow);
+  const routeRows = routeInputs.map((route) => ({
+    content_item_id: item.id,
+    platform: route.platform,
+    target_route: route.target_route,
+    route_label: route.route_label,
+    status: item.status,
+    metadata: {
+      source: "omni_media_publisher",
+      media_asset_id: input.asset.id,
+      actual_platform: route.platform,
+      target_kind: route.target_kind,
+      workflow_status: item.status,
+      execution_status: "pending_review",
+      real_publish_enabled: false,
+    },
+    created_at: now,
+  }));
+  const legacyRouteRows = routeRows.map((route) => ({
+    ...route,
+    platform: legacyContentPlatform(route.platform),
+    status: legacyContentStatus(route.status),
+  }));
+  let routesResult = await supabase.from("content_routes").insert(routeRows).select("*");
+
+  if (isLegacyContentConstraintError(routesResult.error)) {
+    routesResult = await supabase.from("content_routes").insert(legacyRouteRows).select("*");
+  }
+
+  throwIfError("Create publisher routes", routesResult.error);
+  let routes = ((routesResult.data ?? []) as ContentRouteRow[]).map(normalizeContentRoute);
+  let schedule: ContentSchedule | undefined;
+
+  if (input.scheduled_for || item.status === "scheduled" || item.status === "approval_required") {
+    let scheduleResult = await supabase
+      .from("content_schedule")
+      .insert({
+        content_item_id: item.id,
+        scheduled_for: input.scheduled_for ?? null,
+        timezone: input.timezone || "local",
+        status: item.status,
+        created_at: now,
+        updated_at: now,
+      })
+      .select("*")
+      .single();
+
+    if (isLegacyContentConstraintError(scheduleResult.error)) {
+      scheduleResult = await supabase
+        .from("content_schedule")
+        .insert({
+          content_item_id: item.id,
+          scheduled_for: input.scheduled_for ?? null,
+          timezone: input.timezone || "local",
+          status: legacyContentStatus(item.status),
+          created_at: now,
+          updated_at: now,
+        })
+        .select("*")
+        .single();
+    }
+
+    throwIfError("Create publisher schedule", scheduleResult.error);
+    schedule = normalizeContentSchedule(scheduleResult.data as ContentScheduleRow);
+  }
+
+  const assetMetadata = {
+    ...input.asset.metadata,
+    linked_collection: "content",
+    linked_item_id: item.id,
+    linked_item_label: item.title,
+    publisher_content_item_id: item.id,
+    publisher_planned_at: now,
+  };
+  let assetResult = await supabase
+    .from("media_assets")
+    .update({
+      content_item_id: item.id,
+      metadata: assetMetadata,
+      updated_at: now,
+    })
+    .eq("id", input.asset.id)
+    .select("*")
+    .single();
+
+  if (isLegacyMediaStatusError(assetResult.error)) {
+    assetResult = await supabase
+      .from("media_assets")
+      .update({
+        content_item_id: item.id,
+        metadata: assetMetadata,
+      })
+      .eq("id", input.asset.id)
+      .select("*")
+      .single();
+  }
+
+  throwIfError("Link publisher media asset", assetResult.error);
+  const asset = normalizeMediaAsset(assetResult.data as MediaAssetRow);
+  const log =
+    (await insertActionLog(supabase, {
+      project_id: item.project_id,
+      actor: "User",
+      action: "publisher.plan.created",
+      details: `Planned ${item.title} across ${routes.length} route(s). Publish requires approval before execution.`,
+      created_at: now,
+    })) ??
+    localLog({
+      project_id: item.project_id,
+      actor: "User",
+      action: "publisher.plan.created",
+      details: `Planned ${item.title} across ${routes.length} route(s). Publish requires approval before execution.`,
+      created_at: now,
+    });
+  const approvalResult = input.requiresApproval
+    ? await requestContentPublishApproval({
+        supabase,
+        item,
+        routes,
+        reason: "Publisher safety rule: publish_content requires human review before website/social execution.",
+        requestedAt: now,
+      })
+    : undefined;
+
+  if (approvalResult?.item) {
+    const refreshedRoutesResult = await supabase.from("content_routes").select("*").eq("content_item_id", item.id);
+
+    if (!refreshedRoutesResult.error) {
+      routes = ((refreshedRoutesResult.data ?? []) as ContentRouteRow[]).map(normalizeContentRoute);
+    }
+  }
+
+  return {
+    asset,
+    item: approvalResult?.item ?? item,
+    routes,
+    schedule,
+    log,
+    task: approvalResult?.task,
+    state: approvalResult?.state,
+    approval: approvalResult?.approval,
+    approvalLog: approvalResult?.log,
+  };
 }
 
 export async function upsertConnectorInDb(input: {

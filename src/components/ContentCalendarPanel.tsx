@@ -40,8 +40,8 @@ type ContentCalendarPanelProps = {
 };
 
 const contentTypes: ContentType[] = ["post", "story", "website_page", "blog", "reel"];
-const platforms: ContentPlatform[] = ["website", "instagram", "facebook"];
-const statuses: ContentStatus[] = ["draft", "scheduled", "approval_required", "published", "failed"];
+const platforms: ContentPlatform[] = ["website", "instagram", "facebook", "tiktok"];
+const statuses: ContentStatus[] = ["draft", "scheduled", "approval_required", "approved", "published", "failed"];
 
 function label(value: string) {
   return value
@@ -70,7 +70,7 @@ function formatDateTime(iso?: string) {
 }
 
 function statusClass(status: ContentStatus | "blocked") {
-  if (status === "published") {
+  if (status === "published" || status === "approved") {
     return "border-emerald-300/40 bg-emerald-300/10 text-emerald-100";
   }
 
@@ -102,7 +102,15 @@ function aiActionLabel(action: ContentAiAction) {
     return "Web Title";
   }
 
-  return "Story Text";
+  if (action === "generate_story_text") {
+    return "Story Text";
+  }
+
+  if (action === "generate_short_post") {
+    return "Short Post";
+  }
+
+  return "Alt Text";
 }
 
 export function ContentCalendarPanel({
@@ -323,7 +331,14 @@ export function ContentCalendarPanel({
           const itemRoutes = routesByItem[item.id] ?? [];
           const schedule = scheduleByItem[item.id];
           const logs = (publishLogsByItem[item.id] ?? []).slice(0, 2);
-          const aiActions: ContentAiAction[] = ["generate_caption", "generate_hashtags", "generate_website_title", "generate_story_text"];
+          const aiActions: ContentAiAction[] = [
+            "generate_caption",
+            "generate_hashtags",
+            "generate_website_title",
+            "generate_story_text",
+            "generate_short_post",
+            "generate_alt_text",
+          ];
 
           return (
             <article key={item.id} className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
