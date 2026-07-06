@@ -10,12 +10,14 @@ import {
   CalendarDays,
   CheckSquare,
   ChevronRight,
+  Download,
   FileText,
   FolderKanban,
   Home,
   Image as ImageIcon,
   Inbox,
   LayoutDashboard,
+  LogOut,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
@@ -28,9 +30,11 @@ import {
   Sparkles,
   UploadCloud,
   Users,
+  WifiOff,
   Workflow,
   X,
 } from "lucide-react";
+import { useAuth } from "@/components/AuthProvider";
 
 export type AppView =
   | "dashboard"
@@ -63,6 +67,11 @@ type AppShellProps = {
   onReload: () => void;
 };
 
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+};
+
 const navItems: Array<{ href: string; label: string; view: AppView; icon: typeof Home }> = [
   { href: "/dashboard", label: "Dashboard", view: "dashboard", icon: LayoutDashboard },
   { href: "/projects", label: "Projects", view: "projects", icon: FolderKanban },
@@ -80,6 +89,10 @@ const navItems: Array<{ href: string; label: string; view: AppView; icon: typeof
   { href: "/automation", label: "Automation", view: "automation", icon: Workflow },
   { href: "/settings", label: "Settings", view: "settings", icon: Settings },
 ];
+
+const bottomNavItems = navItems.filter((item) =>
+  ["dashboard", "tasks", "inbox", "publisher", "approvals"].includes(item.view),
+);
 
 function statusLabel(isReady: boolean, isSaving: boolean, hasError: boolean) {
   if (hasError) {
@@ -129,9 +142,12 @@ export function AppShell({
   onReload,
 }: AppShellProps) {
   const pathname = usePathname();
+  const { user, signOut } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
   const [isQuickOpen, setIsQuickOpen] = useState(false);
+  const [isOnline, setIsOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -167,6 +183,44 @@ export function AppShell({
 
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
+
+  useEffect(() => {
+    function handleOnline() {
+      setIsOnline(true);
+    }
+
+    function handleOffline() {
+      setIsOnline(false);
+    }
+
+    function handleBeforeInstallPrompt(event: Event) {
+      event.preventDefault();
+      setInstallPrompt(event as BeforeInstallPromptEvent);
+    }
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    };
+  }, []);
+
+  async function handleInstallApp() {
+    if (!installPrompt) {
+      return;
+    }
+
+    await installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+
+    if (choice.outcome === "accepted" || choice.outcome === "dismissed") {
+      setInstallPrompt(null);
+    }
+  }
 
   const notificationBadge = notificationCount > 0 ? (
     <span className="absolute -right-1 -top-1 inline-flex min-h-5 min-w-5 items-center justify-center rounded-full bg-emerald-300 px-1 text-[11px] font-semibold leading-none text-zinc-950">
@@ -239,7 +293,7 @@ export function AppShell({
   );
 
   return (
-    <div className="min-h-screen bg-background text-zinc-100">
+    <div className="min-h-dvh overflow-x-hidden bg-background text-zinc-100">
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60] focus:rounded-lg focus:bg-emerald-300 focus:px-3 focus:py-2 focus:text-sm focus:font-semibold focus:text-zinc-950"
@@ -273,8 +327,8 @@ export function AppShell({
         </div>
       ) : null}
 
-      <div className={`min-h-screen transition-[padding] duration-200 ${isCollapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}>
-        <header className="sticky top-0 z-20 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur">
+      <div className={`min-h-dvh transition-[padding] duration-200 ${isCollapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}>
+        <header className="sticky top-0 z-20 border-b border-zinc-800 bg-zinc-950/90 pt-[env(safe-area-inset-top)] backdrop-blur">
           <div className="flex min-h-16 items-center gap-3 px-4 sm:px-6 lg:px-8">
             <button
               type="button"
@@ -291,6 +345,17 @@ export function AppShell({
             </div>
             {toolbar ? <div className="hidden min-w-0 flex-1 items-center gap-3 lg:flex">{toolbar}</div> : null}
             <div className="hidden items-center gap-3 sm:flex">
+              {installPrompt ? (
+                <button
+                  type="button"
+                  onClick={() => void handleInstallApp()}
+                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-zinc-800 px-3 text-sm font-medium text-zinc-100 transition hover:border-sky-300 hover:text-sky-200"
+                  title="Install app"
+                >
+                  <Download className="h-4 w-4" aria-hidden="true" />
+                  Install
+                </button>
+              ) : null}
               <Link
                 href={notificationsHref}
                 className="relative inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-zinc-800 px-3 text-sm font-medium text-zinc-100 transition hover:border-emerald-300 hover:text-emerald-200"
@@ -315,10 +380,31 @@ export function AppShell({
                 <RefreshCw className="h-4 w-4" aria-hidden="true" />
                 Reload
               </button>
+              <button
+                type="button"
+                onClick={() => void signOut()}
+                aria-label={`Logout ${user?.email ?? "user"}`}
+                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-zinc-700 px-3 text-sm font-medium text-zinc-100 transition hover:border-rose-300 hover:text-rose-100"
+                title={`Logout ${user?.email ?? "user"}`}
+              >
+                <LogOut className="h-4 w-4" aria-hidden="true" />
+                Logout
+              </button>
             </div>
           </div>
           {toolbar || mobileToolbar ? <div className="flex gap-2 overflow-x-auto border-t border-zinc-900 px-4 py-2 lg:hidden">{mobileToolbar ?? toolbar}</div> : null}
           <div className="flex gap-2 overflow-x-auto border-t border-zinc-900 px-4 py-2 sm:hidden">
+            {installPrompt ? (
+              <button
+                type="button"
+                onClick={() => void handleInstallApp()}
+                aria-label="Install app"
+                className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-800 px-3 text-zinc-100"
+                title="Install app"
+              >
+                <Download className="h-4 w-4" aria-hidden="true" />
+              </button>
+            ) : null}
             <Link
               href={notificationsHref}
               className="relative inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-800 px-3 text-zinc-100"
@@ -342,15 +428,56 @@ export function AppShell({
               <RefreshCw className="h-4 w-4" aria-hidden="true" />
               Reload
             </button>
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              aria-label="Logout"
+              className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-700 px-3 text-zinc-100"
+              title="Logout"
+            >
+              <LogOut className="h-4 w-4" aria-hidden="true" />
+            </button>
           </div>
+          {!isOnline ? (
+            <div className="flex min-h-10 items-center justify-center gap-2 border-t border-amber-300/20 bg-amber-300/10 px-4 text-sm font-medium text-amber-100" role="status" aria-live="polite">
+              <WifiOff className="h-4 w-4" aria-hidden="true" />
+              Connection lost
+            </div>
+          ) : null}
         </header>
 
-        <main id="main-content" className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
+        <main id="main-content" className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 pb-28 pt-6 sm:px-6 lg:px-8 lg:pb-6">
           {children}
         </main>
       </div>
 
-      <div className="fixed bottom-5 right-5 z-40 flex flex-col items-end gap-3">
+      <nav
+        className="fixed inset-x-0 bottom-0 z-30 border-t border-zinc-800 bg-zinc-950/95 px-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] pt-2 shadow-2xl shadow-black/40 backdrop-blur lg:hidden"
+        aria-label="Mobile navigation"
+      >
+        <div className="mx-auto grid max-w-md grid-cols-5 gap-1">
+          {bottomNavItems.map((item) => {
+            const Icon = item.icon;
+            const active = pathname === item.href;
+
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                aria-current={active ? "page" : undefined}
+                className={`flex min-h-12 flex-col items-center justify-center gap-1 rounded-lg px-1 text-[11px] font-medium transition ${
+                  active ? "bg-zinc-800 text-emerald-100" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
+                }`}
+              >
+                <Icon className="h-4 w-4" aria-hidden="true" />
+                <span className="max-w-full truncate">{item.label}</span>
+              </Link>
+            );
+          })}
+        </div>
+      </nav>
+
+      <div className="fixed bottom-[calc(env(safe-area-inset-bottom)+5.75rem)] right-4 z-40 flex flex-col items-end gap-3 lg:bottom-5 lg:right-5">
         {isQuickOpen ? (
           <div
             id="quick-actions-menu"

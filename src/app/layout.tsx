@@ -1,5 +1,7 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { AuthProvider } from "@/components/AuthProvider";
+import { PwaRegistrar } from "@/components/PwaRegistrar";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -13,8 +15,28 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Handover Control Center",
-  description: "A simple MVP foundation for saved task state, AI handoffs, approvals, and action history.",
+  title: "AI Wildsaura Control",
+  description: "Private AI Control Center for Wildsaura handoffs, inbox, approvals, publisher, and automation.",
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Wildsaura AI",
+  },
+  icons: {
+    icon: [
+      { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [{ url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" }],
+  },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#0b0f14",
 };
 
 export default function RootLayout({
@@ -25,7 +47,8 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full`}>
       <body className="min-h-full bg-background text-foreground antialiased">
-        {children}
+        <AuthProvider>{children}</AuthProvider>
+        <PwaRegistrar />
       </body>
     </html>
   );
