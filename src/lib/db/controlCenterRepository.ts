@@ -3213,6 +3213,8 @@ export async function createMediaAssetInDb(input: {
     linked_item_id: input.linked_item_id ?? input.content_item_id ?? "",
     linked_item_label: input.linked_item_label ?? "",
     upload_metadata: input.upload_metadata,
+    thumbnail_data_url: input.upload_metadata.thumbnail_data_url ?? "",
+    thumbnail_kind: input.upload_metadata.thumbnail_kind ?? "",
     writes_enabled: false,
   };
   const mediaPayload = (status: string) => ({
@@ -4221,7 +4223,11 @@ export async function approveActionInDb(input: {
       project_id: input.contentItem?.project_id,
       content_item_id: input.contentItem?.id,
       route_id: route.id,
-      action: executionResult.execution_status === "executed" ? "connector_publish_executed" : "connector_publish_execution_pending",
+      action: executionResult.execution_status === "executed"
+        ? "connector_publish_executed"
+        : executionResult.execution_status === "failed"
+          ? "connector_publish_failed"
+          : "connector_publish_execution_pending",
       status: executionResult.execution_status === "executed" ? "published" : contentStatus,
       details: executionResult.details,
       created_at: resolvedAt,

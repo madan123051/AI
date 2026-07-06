@@ -108,6 +108,38 @@ function uploadMetadataString(asset: MediaAsset, key: string) {
   return typeof value === "string" ? value : "";
 }
 
+function renderableImageUrl(value: string) {
+  return /^https?:\/\//i.test(value) || /^data:image\//i.test(value);
+}
+
+function renderableVideoUrl(value: string) {
+  return /^https?:\/\//i.test(value) || /^data:video\//i.test(value);
+}
+
+function assetThumbnailUrl(asset: MediaAsset) {
+  const candidates = [
+    metadataString(asset, "thumbnail_data_url"),
+    uploadMetadataString(asset, "thumbnail_data_url"),
+    metadataString(asset, "thumbnail_url"),
+    metadataString(asset, "thumbnailUrl"),
+    metadataString(asset, "image_url"),
+    metadataString(asset, "imageUrl"),
+    asset.source_url,
+  ];
+
+  return candidates.find((candidate) => renderableImageUrl(candidate)) ?? "";
+}
+
+function assetVideoUrl(asset: MediaAsset) {
+  const candidates = [
+    metadataString(asset, "video_url"),
+    metadataString(asset, "videoUrl"),
+    asset.source_url,
+  ];
+
+  return candidates.find((candidate) => renderableVideoUrl(candidate)) ?? "";
+}
+
 function linkTargetLabel(target?: MediaLinkTarget) {
   if (target === "photo") {
     return "Photo";
@@ -594,12 +626,26 @@ export function MediaLibraryPanel({
             const licenseText = uploadMetadataString(asset, "license");
             const linkedCollection = asset.linked_collection;
             const linkedLabel = (asset.linked_item_label ?? metadataString(asset, "linked_item_label")) || linkedContent?.title;
+            const thumbnailUrl = assetThumbnailUrl(asset);
+            const videoUrl = asset.asset_type === "video" ? assetVideoUrl(asset) : "";
 
             return (
               <article key={asset.id} className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-4">
                 <div className="mb-4 flex items-start gap-3">
-                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-emerald-300">
-                    {typeIcon(asset.asset_type)}
+                  <div className="relative flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 text-emerald-300">
+                    {thumbnailUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={thumbnailUrl} alt={asset.alt_text || asset.title} className="h-full w-full object-cover" loading="lazy" />
+                    ) : videoUrl ? (
+                      <video src={videoUrl} className="h-full w-full object-cover" muted playsInline preload="metadata" />
+                    ) : (
+                      typeIcon(asset.asset_type)
+                    )}
+                    {asset.asset_type === "video" ? (
+                      <span className="absolute bottom-1 right-1 rounded-md bg-zinc-950/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-zinc-100">
+                        Video
+                      </span>
+                    ) : null}
                   </div>
                   <div className="min-w-0 flex-1">
                     <h3 className="break-words text-base font-semibold text-zinc-50">{asset.title}</h3>

@@ -1,6 +1,6 @@
 import { createSign } from "node:crypto";
 import { sendEmail } from "@/lib/connectors/emailConnectionService";
-import type { Approval, Connector, ConnectorExecutionResult, Message } from "@/lib/types";
+import type { Approval, Connector, ConnectorExecutionResult, ContentItem, ContentRoute, MediaAsset, Message } from "@/lib/types";
 
 type FirestoreField =
   | { stringValue: string }
@@ -29,10 +29,28 @@ type WebsiteCommentTarget = {
   targetId: string;
 };
 
+type WebsitePublishCollection = "photos" | "stories" | "videos";
+
+type WebsiteMediaAnalysis = {
+  title?: string;
+  caption?: string;
+  category?: string;
+  tags?: string[];
+  animalName?: string;
+  location?: string;
+  alt_text?: string;
+  excerpt?: string;
+  content?: string;
+};
+
 let cachedAccessToken: { token: string; expiresAt: number } | null = null;
 
 function textValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
 function firstTextValue(records: Array<Record<string, unknown> | undefined>, keys: string[]) {
@@ -69,6 +87,31 @@ function firstEmailValue(records: Array<Record<string, unknown> | undefined>, ke
   }
 
   return "";
+}
+
+function firstArrayValue(records: Array<Record<string, unknown> | undefined>, keys: string[]) {
+  for (const record of records) {
+    if (!record) {
+      continue;
+    }
+
+    for (const key of keys) {
+      const value = record[key];
+
+      if (Array.isArray(value)) {
+        return value.map((item) => String(item).trim()).filter(Boolean);
+      }
+
+      if (typeof value === "string" && value.trim()) {
+        return value
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+      }
+    }
+  }
+
+  return [];
 }
 
 function emailAddressValue(value: string) {
@@ -326,6 +369,428 @@ function documentIdFromName(name?: string) {
   return name?.split("/").pop() ?? "";
 }
 
+function slugify(value: string) {
+  const slug = value
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return slug || `wildsaura-${Date.now()}`;
+}
+
+function isPublicMediaUrl(value: string) {
+  return /^https?:\/\//i.test(value.trim());
+}
+
+function uniqueTags(values: string[]) {
+  return Array.from(
+    new Set(
+      values
+        .flatMap((value) => value.split(","))
+        .map((value) => value.replace(/^#/, "").trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, 20);
+}
+
+function safeCategory(value: string) {
+  const category = value.toLowerCase().trim();
+  const allowed = new Set(["wildlife", "birds", "macro", "domestic", "landscape", "street", "nature", "other"]);
+
+  if (category === "landscapes") {
+    return "landscape";
+  }
+
+  return allowed.has(category) ? category : "wildlife";
+}
+
+function compactText(value: string, maxLength = 220) {
+  const compact = value.replace(/\s+/g, " ").trim();
+
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+
+  return `${compact.slice(0, maxLength - 1).trim()}...`;
+}
+
+function websiteCollectionForPublish(input: {
+  item: ContentItem;
+  routes?: ContentRoute[];
+  mediaAsset?: MediaAsset;
+}): WebsitePublishCollection {
+  const websiteRoute = input.routes?.find((route) => route.platform === "website") ?? input.routes?.[0];
+  const targetKind = firstTextValue([websiteRoute?.metadata], ["target_kind", "collection", "target_collection"]).toLowerCase();
+  const routeText = `${websiteRoute?.target_route ?? ""} ${websiteRoute?.route_label ?? ""}`.toLowerCase();
+
+  if (targetKind.includes("video") || routeText.includes("video") || input.item.content_type === "reel" || input.mediaAsset?.asset_type === "video") {
+    return "videos";
+  }
+
+  if (targetKind.includes("story") || routeText.includes("stor") || input.item.content_type === "story" || input.item.content_type === "blog") {
+    return "stories";
+  }
+
+  return "photos";
+}
+
+function websiteCollectionLabel(collection: WebsitePublishCollection) {
+  return collection === "photos" ? "photo" : collection === "stories" ? "story" : "video";
+}
+
+function resolvePrimaryMediaUrl(input: {
+  item: ContentItem;
+  mediaAsset?: MediaAsset;
+  collection: WebsitePublishCollection;
+}) {
+  const metadataRecords = [input.mediaAsset?.metadata, input.item.metadata];
+  const mediaUrl = firstTextValue(
+    [
+      recordOf(input.mediaAsset),
+      recordOf(input.item),
+      input.mediaAsset?.metadata,
+      input.item.metadata,
+    ],
+    [
+      input.collection === "videos" ? "video_url" : "image_url",
+      input.collection === "videos" ? "videoUrl" : "imageUrl",
+      "source_url",
+      "media_url",
+      "mediaUrl",
+      "public_url",
+      "publicUrl",
+      "storage_url",
+      "storageUrl",
+      "storage_path",
+      "storagePath",
+      "media_placeholder",
+    ],
+  );
+  const thumbnailUrl = firstTextValue(
+    [
+      input.mediaAsset?.metadata,
+      input.item.metadata,
+      recordOf(input.mediaAsset),
+    ],
+    ["thumbnail_url", "thumbnailUrl", "cover_image_url", "coverImageUrl", "image_url", "imageUrl", "source_url"],
+  );
+  const storagePath = firstTextValue([recordOf(input.mediaAsset), ...metadataRecords], ["storage_path", "storagePath"]);
+
+  return {
+    mediaUrl: isPublicMediaUrl(mediaUrl) ? mediaUrl : "",
+    thumbnailUrl: isPublicMediaUrl(thumbnailUrl) ? thumbnailUrl : "",
+    storagePath,
+    rawMediaReference: mediaUrl || storagePath || input.item.media_placeholder,
+  };
+}
+
+function recognitionPrompt(input: { item: ContentItem; mediaAsset?: MediaAsset; collection: WebsitePublishCollection }) {
+  return JSON.stringify(
+    {
+      instruction:
+        "Analyze this Wildsaura media in the same style as a nature-documentary website admin assistant. Return only JSON.",
+      required_json_shape: {
+        title: "short website title",
+        caption: "natural caption or description",
+        category: "wildlife | birds | macro | domestic | landscape | street | nature | other",
+        tags: ["short tags without #"],
+        animalName: "detected animal or subject, empty if unknown",
+        location: "visible or inferred place, empty if unknown",
+        alt_text: "accessible image/video alt text",
+        excerpt: "one sentence story excerpt",
+        content: "short story/body text",
+      },
+      context: {
+        current_title: input.item.title,
+        current_caption: input.item.caption_body,
+        media_title: input.mediaAsset?.title,
+        media_alt_text: input.mediaAsset?.alt_text,
+        media_tags: input.mediaAsset?.tags ?? [],
+        target_collection: input.collection,
+      },
+    },
+    null,
+    2,
+  );
+}
+
+function parseJsonObject(value: string) {
+  const trimmed = value.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1]?.trim() ?? trimmed;
+  return JSON.parse(fenced) as Record<string, unknown>;
+}
+
+function normalizeWebsiteAnalysis(value: Record<string, unknown>): WebsiteMediaAnalysis {
+  return {
+    title: textValue(value.title),
+    caption: textValue(value.caption),
+    category: textValue(value.category),
+    tags: Array.isArray(value.tags) ? value.tags.map((tag) => String(tag).trim()).filter(Boolean) : [],
+    animalName: textValue(value.animalName) || textValue(value.animal_name),
+    location: textValue(value.location),
+    alt_text: textValue(value.alt_text) || textValue(value.altText),
+    excerpt: textValue(value.excerpt),
+    content: textValue(value.content),
+  };
+}
+
+async function recognizeWebsiteMedia(input: {
+  item: ContentItem;
+  mediaAsset?: MediaAsset;
+  collection: WebsitePublishCollection;
+  analysisImageUrl: string;
+}): Promise<{ analysis: WebsiteMediaAnalysis; source: "openrouter_vision" | "metadata_fallback"; error?: string }> {
+  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+
+  if (!apiKey || !input.analysisImageUrl) {
+    return { analysis: {}, source: "metadata_fallback" };
+  }
+
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
+        "X-Title": "AI Handover Control Center",
+      },
+      body: JSON.stringify({
+        model: process.env.OPENROUTER_VISION_MODEL?.trim() || process.env.OPENROUTER_GPT_MODEL?.trim() || "openai/gpt-4o-mini",
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are Wildsaura's media recognition assistant. Identify wildlife, macro subjects, scenes, and write concise nature-documentary metadata. Return valid JSON only.",
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: recognitionPrompt(input) },
+              { type: "image_url", image_url: { url: input.analysisImageUrl } },
+            ],
+          },
+        ],
+      }),
+      cache: "no-store",
+    });
+    const payload = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+      error?: { message?: string };
+    };
+
+    if (!response.ok) {
+      throw new Error(payload.error?.message ?? `OpenRouter vision request failed with ${response.status}`);
+    }
+
+    const content = payload.choices?.[0]?.message?.content;
+
+    if (!content) {
+      throw new Error("OpenRouter vision response did not include message content.");
+    }
+
+    return { analysis: normalizeWebsiteAnalysis(parseJsonObject(content)), source: "openrouter_vision" };
+  } catch (error) {
+    return {
+      analysis: {},
+      source: "metadata_fallback",
+      error: error instanceof Error ? error.message : "AI media recognition failed.",
+    };
+  }
+}
+
+function buildWebsiteMetadata(input: {
+  approval: Approval;
+  item: ContentItem;
+  mediaAsset?: MediaAsset;
+  analysis: WebsiteMediaAnalysis;
+  collection: WebsitePublishCollection;
+  mediaUrl: string;
+  thumbnailUrl: string;
+  storagePath: string;
+  now: string;
+}) {
+  const metadataRecords = [recordOf(input.analysis), input.item.metadata, input.mediaAsset?.metadata, recordOf(input.mediaAsset)];
+  const title =
+    firstTextValue(metadataRecords, ["title", "ai_website_title", "website_title"]) ||
+    input.item.title ||
+    input.mediaAsset?.title ||
+    "Wildsaura Field Note";
+  const caption =
+    input.approval.draft_text.trim() ||
+    firstTextValue(metadataRecords, ["caption", "ai_caption", "ai_short_post", "ai_story_text", "alt_text", "altText"]) ||
+    input.item.caption_body ||
+    input.mediaAsset?.alt_text ||
+    title;
+  const tags = uniqueTags([
+    ...firstArrayValue(metadataRecords, ["tags", "ai_hashtags"]),
+    ...(input.mediaAsset?.tags ?? []),
+    input.collection === "photos" ? "wildlife" : input.collection === "stories" ? "story" : "video",
+  ]);
+  const credit = firstTextValue([input.mediaAsset?.metadata, input.item.metadata], ["credit", "license_credit", "photographer"]) || "Wildsaura";
+  const location = firstTextValue(metadataRecords, ["location"]);
+  const animalName = firstTextValue(metadataRecords, ["animalName", "animal_name", "subject"]);
+  const base = {
+    source: "wildsaura",
+    status: "approved",
+    isPublic: true,
+    published: true,
+    createdAt: input.now,
+    updatedAt: input.now,
+    aiControlCenterContentItemId: input.item.id,
+    aiControlCenterApprovalId: input.approval.id,
+    aiControlCenterMediaAssetId: input.mediaAsset?.id ?? "",
+    aiGenerated: true,
+  };
+
+  if (input.collection === "videos") {
+    return {
+      ...base,
+      title,
+      description: caption,
+      videoUrl: input.mediaUrl,
+      thumbnailUrl: input.thumbnailUrl || input.mediaUrl,
+      tags,
+      location,
+      duration: firstTextValue(metadataRecords, ["duration"]),
+      viewCount: 0,
+      likeCount: 0,
+      liked: false,
+      photographer: credit,
+      storagePath: input.storagePath,
+      altText: firstTextValue(metadataRecords, ["alt_text", "altText"]) || compactText(caption, 160),
+    };
+  }
+
+  if (input.collection === "stories") {
+    const excerpt = firstTextValue(metadataRecords, ["excerpt"]) || compactText(caption, 150);
+    const content =
+      firstTextValue(metadataRecords, ["content", "story_content", "ai_story_text"]) ||
+      input.item.caption_body ||
+      caption;
+
+    return {
+      ...base,
+      title,
+      slug: slugify(title),
+      excerpt,
+      content,
+      coverImageUrl: input.mediaUrl,
+      imageUrl: input.mediaUrl,
+      tags,
+      viewCount: 0,
+      likeCount: 0,
+      liked: false,
+      photographer: credit,
+      storagePath: input.storagePath,
+      altText: firstTextValue(metadataRecords, ["alt_text", "altText"]) || compactText(caption, 160),
+    };
+  }
+
+  return {
+    ...base,
+    slug: slugify(title),
+    title,
+    caption,
+    category: safeCategory(firstTextValue(metadataRecords, ["category"])),
+    imageUrl: input.mediaUrl,
+    thumbnailUrl: input.thumbnailUrl || input.mediaUrl,
+    location,
+    tags,
+    animalName,
+    wikiSummary: firstTextValue(metadataRecords, ["wikiSummary", "wiki_summary"]),
+    likeCount: 0,
+    viewCount: 0,
+    liked: false,
+    type: "photo",
+    photographer: credit,
+    storagePath: input.storagePath,
+    altText: firstTextValue(metadataRecords, ["alt_text", "altText"]) || compactText(caption, 160),
+  };
+}
+
+async function executeWebsiteContentPublish(input: {
+  approval: Approval;
+  contentItem?: ContentItem;
+  routes?: ContentRoute[];
+  mediaAsset?: MediaAsset;
+}): Promise<ConnectorExecutionResult> {
+  try {
+    if (!input.contentItem) {
+      throw new Error("Cannot publish website content because the linked content item could not be found.");
+    }
+
+    const collection = websiteCollectionForPublish({
+      item: input.contentItem,
+      routes: input.routes,
+      mediaAsset: input.mediaAsset,
+    });
+    const media = resolvePrimaryMediaUrl({
+      item: input.contentItem,
+      mediaAsset: input.mediaAsset,
+      collection,
+    });
+
+    if (!media.mediaUrl) {
+      throw new Error(
+        `Cannot publish ${websiteCollectionLabel(collection)} to Wildsaura because no public media URL is available. Found "${media.rawMediaReference || "empty"}". Upload the file to Supabase/Firebase Storage or paste a public media URL before approving.`,
+      );
+    }
+
+    const now = new Date().toISOString();
+    const recognition = await recognizeWebsiteMedia({
+      item: input.contentItem,
+      mediaAsset: input.mediaAsset,
+      collection,
+      analysisImageUrl: media.thumbnailUrl || media.mediaUrl,
+    });
+    const documentData = buildWebsiteMetadata({
+      approval: input.approval,
+      item: input.contentItem,
+      mediaAsset: input.mediaAsset,
+      analysis: recognition.analysis,
+      collection,
+      mediaUrl: media.mediaUrl,
+      thumbnailUrl: media.thumbnailUrl,
+      storagePath: media.storagePath,
+      now,
+    });
+    const document = await createFirestoreDocument(collection, documentData);
+    const documentId = documentIdFromName(document.name);
+    const routeIds = input.routes?.filter((route) => route.platform === "website").map((route) => route.id) ?? [];
+
+    return {
+      execution_status: "executed",
+      details: `Website ${websiteCollectionLabel(collection)} published to Wildsaura Firestore ${collection}/${documentId}.`,
+      log_action: "connector.website.publish_executed",
+      metadata: {
+        firestore_collection: collection,
+        firestore_document_id: documentId,
+        content_item_id: input.contentItem.id,
+        media_asset_id: input.mediaAsset?.id ?? "",
+        website_route_ids: routeIds,
+        recognition_source: recognition.source,
+        recognition_error: recognition.error,
+        published_title: textValue(documentData.title),
+        published_at: now,
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Website publish execution failed.";
+
+    return {
+      execution_status: "failed",
+      execution_error: message,
+      details: message,
+      log_action: "connector.website.publish_failed",
+    };
+  }
+}
+
+
 async function getFirestoreDocument(collectionName: string, documentId: string) {
   const response = await fetch(firestoreDocumentUrl(collectionName, documentId), {
     method: "GET",
@@ -469,6 +934,9 @@ export async function executeWebsiteApproval(input: {
   approval: Approval;
   message?: Message;
   connectors?: Connector[];
+  contentItem?: ContentItem;
+  routes?: ContentRoute[];
+  mediaAsset?: MediaAsset;
 }): Promise<ConnectorExecutionResult> {
   if (input.approval.connector !== "website") {
     return {
@@ -481,6 +949,10 @@ export async function executeWebsiteApproval(input: {
 
   if (input.approval.action_type === "reply_message") {
     return executeWebsiteMessageReply(input);
+  }
+
+  if (input.approval.action_type === "publish_content") {
+    return executeWebsiteContentPublish(input);
   }
 
   if (input.approval.action_type !== "reply_comment") {

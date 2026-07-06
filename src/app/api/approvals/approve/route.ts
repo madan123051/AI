@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { approveActionInDb, loadControlCenterData } from "@/lib/db/controlCenterRepository";
 import { executeWebsiteApproval } from "@/lib/connectors/websiteExecutionService";
-import type { Approval, ConnectorExecutionResult, ContentRoute, Message, Task, TaskState } from "@/lib/types";
+import type { Approval, ConnectorExecutionResult, ContentItem, ContentRoute, MediaAsset, Message, Task, TaskState } from "@/lib/types";
 
 const REPLY_APPROVAL_PREFIX = "reply_comment:";
 const PUBLISH_APPROVAL_PREFIX = "publish_content:";
@@ -81,11 +81,16 @@ function contentTargetId(approval: Approval) {
 async function executionResultForApproval(input: {
   approval: Approval;
   message?: Message;
+  contentItem?: ContentItem;
+  routes?: ContentRoute[];
+  mediaAsset?: MediaAsset;
   connectors: Awaited<ReturnType<typeof loadControlCenterData>>["connectors"];
 }): Promise<ConnectorExecutionResult | undefined> {
   if (
     input.approval.connector === "website" &&
-    (input.approval.action_type === "reply_comment" || input.approval.action_type === "reply_message")
+    (input.approval.action_type === "reply_comment" ||
+      input.approval.action_type === "reply_message" ||
+      input.approval.action_type === "publish_content")
   ) {
     return executeWebsiteApproval(input);
   }
@@ -138,6 +143,8 @@ export async function POST(request: Request) {
     const contentRoutes: ContentRoute[] | undefined = publishContentId
       ? data.content_routes.filter((route) => route.content_item_id === publishContentId)
       : undefined;
+    const mediaAssetId = contentItem ? metadataText(contentItem.metadata, "media_asset_id") : "";
+    const mediaAsset = mediaAssetId ? data.media_assets.find((item) => item.id === mediaAssetId) : undefined;
     const resolvedAt = new Date().toISOString();
     const approvedApproval: Approval = {
       ...approval,
@@ -147,6 +154,9 @@ export async function POST(request: Request) {
     const executionResult = await executionResultForApproval({
       approval: approvedApproval,
       message,
+      contentItem,
+      routes: contentRoutes,
+      mediaAsset,
       connectors: data.connectors,
     });
     const result = await approveActionInDb({

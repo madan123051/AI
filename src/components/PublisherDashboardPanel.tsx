@@ -99,6 +99,7 @@ type DraftAsset = {
   size: number;
   asset_type: MediaAssetType;
   preview_url: string;
+  thumbnail_data_url: string;
   title: string;
   description: string;
   tags: string;
@@ -335,6 +336,93 @@ function metadataArray(metadata: Record<string, unknown>, key: string) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+function metadataRecord(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function nestedMetadataString(metadata: Record<string, unknown>, parentKey: string, key: string) {
+  return metadataString(metadataRecord(metadata, parentKey), key);
+}
+
+function renderableImageUrl(value: string) {
+  return /^https?:\/\//i.test(value) || /^data:image\//i.test(value);
+}
+
+function renderableVideoUrl(value: string) {
+  return /^https?:\/\//i.test(value) || /^data:video\//i.test(value);
+}
+
+function assetThumbnailUrl(asset: MediaAsset) {
+  const candidates = [
+    metadataString(asset.metadata, "thumbnail_data_url"),
+    nestedMetadataString(asset.metadata, "upload_metadata", "thumbnail_data_url"),
+    metadataString(asset.metadata, "thumbnail_url"),
+    metadataString(asset.metadata, "thumbnailUrl"),
+    metadataString(asset.metadata, "image_url"),
+    metadataString(asset.metadata, "imageUrl"),
+    asset.source_url,
+  ];
+
+  return candidates.find((candidate) => renderableImageUrl(candidate)) ?? "";
+}
+
+function assetVideoUrl(asset: MediaAsset) {
+  const candidates = [
+    metadataString(asset.metadata, "video_url"),
+    metadataString(asset.metadata, "videoUrl"),
+    asset.source_url,
+  ];
+
+  return candidates.find((candidate) => renderableVideoUrl(candidate)) ?? "";
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not generate image thumbnail."));
+    image.src = src;
+  });
+}
+
+async function createImageThumbnailDataUrl(file: File) {
+  if (!file.type.startsWith("image/")) {
+    return "";
+  }
+
+  const dataUrl = await readFileAsDataUrl(file);
+  const image = await loadImage(dataUrl);
+  const maxSide = 420;
+  const scale = Math.min(1, maxSide / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
+  const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+  const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    return "";
+  }
+
+  canvas.width = width;
+  canvas.height = height;
+  context.drawImage(image, 0, 0, width, height);
+
+  return canvas.toDataURL("image/jpeg", 0.72);
+}
+
 function scheduleForMode(mode: ScheduleMode, startAt: string, index: number) {
   if (mode === "publish_now") {
     return undefined;
@@ -568,8 +656,8 @@ export function PublisherDashboardPanel({
     .map((routeId) => routeTargets.find((route) => route.id === routeId))
     .filter((route): route is (typeof routeTargets)[number] => Boolean(route));
 
-  function addFiles(files: FileList | File[]) {
-    const nextDrafts = Array.from(files).map((file) => {
+  async function addFiles(files: FileList | File[]) {
+    const nextDrafts = await Promise.all(Array.from(files).map(async (file) => {
       const assetType: MediaAssetType = file.type.startsWith("video/")
         ? "video"
         : file.type.startsWith("image/")
@@ -588,6 +676,7 @@ export function PublisherDashboardPanel({
         size: file.size,
         asset_type: assetType,
         preview_url: previewUrl,
+        thumbnail_data_url: await createImageThumbnailDataUrl(file).catch(() => ""),
         title: titleFromFileName(file.name),
         description: "",
         tags: "",
@@ -595,14 +684,14 @@ export function PublisherDashboardPanel({
         credit: "Wildsaura",
         notes: "",
       };
-    });
+    }));
 
     setDrafts((current) => [...current, ...nextDrafts]);
   }
 
   function handleFileInput(event: ChangeEvent<HTMLInputElement>) {
     if (event.target.files) {
-      addFiles(event.target.files);
+      void addFiles(event.target.files);
       event.target.value = "";
     }
   }
@@ -612,7 +701,7 @@ export function PublisherDashboardPanel({
     setIsDragging(false);
 
     if (event.dataTransfer.files.length > 0) {
-      addFiles(event.dataTransfer.files);
+      void addFiles(event.dataTransfer.files);
     }
   }
 
@@ -655,6 +744,8 @@ export function PublisherDashboardPanel({
           license: draft.license.trim(),
           credit: draft.credit.trim(),
           storage_mode: "local_placeholder",
+          thumbnail_data_url: draft.thumbnail_data_url,
+          thumbnail_kind: draft.thumbnail_data_url ? "client_generated" : "",
         },
         notes: draft.notes.trim(),
       })),
@@ -1019,6 +1110,8 @@ export function PublisherDashboardPanel({
                 const caption = metadataString(asset.metadata, "ai_caption");
                 const shortPost = metadataString(asset.metadata, "ai_short_post");
                 const hashtags = metadataArray(asset.metadata, "ai_hashtags");
+                const thumbnailUrl = assetThumbnailUrl(asset);
+                const videoUrl = asset.asset_type === "video" ? assetVideoUrl(asset) : "";
 
                 return (
                   <article
@@ -1034,8 +1127,22 @@ export function PublisherDashboardPanel({
                           className="h-4 w-4 accent-emerald-300"
                         />
                       </label>
-                      <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-400">
-                        {asset.asset_type === "video" ? <Video className="h-6 w-6" aria-hidden="true" /> : <ImageIcon className="h-6 w-6" aria-hidden="true" />}
+                      <div className="relative flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-400">
+                        {thumbnailUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={thumbnailUrl} alt={asset.alt_text || asset.title} className="h-full w-full object-cover" loading="lazy" />
+                        ) : videoUrl ? (
+                          <video src={videoUrl} className="h-full w-full object-cover" muted playsInline preload="metadata" />
+                        ) : asset.asset_type === "video" ? (
+                          <Video className="h-6 w-6" aria-hidden="true" />
+                        ) : (
+                          <ImageIcon className="h-6 w-6" aria-hidden="true" />
+                        )}
+                        {asset.asset_type === "video" ? (
+                          <span className="absolute bottom-1 right-1 rounded-md bg-zinc-950/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-zinc-100">
+                            Video
+                          </span>
+                        ) : null}
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
