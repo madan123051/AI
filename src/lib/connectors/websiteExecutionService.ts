@@ -1,4 +1,4 @@
-import { createSign } from "node:crypto";
+import { createSign, randomUUID } from "node:crypto";
 import { sendEmail } from "@/lib/connectors/emailConnectionService";
 import type { Approval, Connector, ConnectorExecutionResult, ContentItem, ContentRoute, MediaAsset, Message } from "@/lib/types";
 
@@ -43,7 +43,10 @@ type WebsiteMediaAnalysis = {
   content?: string;
 };
 
-let cachedAccessToken: { token: string; expiresAt: number } | null = null;
+const firebaseDatastoreScope = "https://www.googleapis.com/auth/datastore";
+const firebaseStorageScope = "https://www.googleapis.com/auth/devstorage.read_write";
+
+const cachedAccessTokens = new Map<string, { token: string; expiresAt: number }>();
 
 function textValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -230,6 +233,14 @@ function firebaseApiKey() {
   return process.env.WILDSAURA_FIREBASE_API_KEY ?? process.env.FIREBASE_API_KEY ?? "";
 }
 
+function firebaseStorageBucket() {
+  const projectId = firebaseProjectId();
+
+  return process.env.WILDSAURA_FIREBASE_STORAGE_BUCKET ??
+    process.env.FIREBASE_STORAGE_BUCKET ??
+    (projectId ? `${projectId}.firebasestorage.app` : "");
+}
+
 function parseServiceAccountJson(value: string): FirebaseServiceAccount | undefined {
   try {
     return JSON.parse(value) as FirebaseServiceAccount;
@@ -270,16 +281,22 @@ function firebaseServiceAccount() {
   return undefined;
 }
 
+function hasFirebaseServiceAccountCredentials() {
+  return Boolean(firebaseServiceAccount());
+}
+
 function base64Url(value: string | Buffer) {
   return Buffer.from(value).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
-async function getServiceAccountAccessToken() {
+async function getServiceAccountAccessToken(scope = firebaseDatastoreScope) {
   const serviceAccount = firebaseServiceAccount();
 
   if (!serviceAccount) {
     return "";
   }
+
+  const cachedAccessToken = cachedAccessTokens.get(scope);
 
   if (cachedAccessToken && cachedAccessToken.expiresAt > Date.now() + 60_000) {
     return cachedAccessToken.token;
@@ -290,7 +307,7 @@ async function getServiceAccountAccessToken() {
   const payload = base64Url(
     JSON.stringify({
       iss: serviceAccount.client_email,
-      scope: "https://www.googleapis.com/auth/datastore",
+      scope,
       aud: "https://oauth2.googleapis.com/token",
       iat: now,
       exp: now + 3600,
@@ -319,12 +336,12 @@ async function getServiceAccountAccessToken() {
     throw new Error("Firebase service account token response did not include an access token.");
   }
 
-  cachedAccessToken = {
+  cachedAccessTokens.set(scope, {
     token: tokenResponse.access_token,
     expiresAt: Date.now() + (tokenResponse.expires_in ?? 3600) * 1000,
-  };
+  });
 
-  return cachedAccessToken.token;
+  return tokenResponse.access_token;
 }
 
 function firestoreDocumentUrl(collectionName: string, documentId?: string) {
@@ -381,6 +398,127 @@ function slugify(value: string) {
 
 function isPublicMediaUrl(value: string) {
   return /^https?:\/\//i.test(value.trim());
+}
+
+function isImageDataUrl(value: string) {
+  return /^data:image\/[a-z0-9.+-]+;base64,/i.test(value.trim());
+}
+
+function parseImageDataUrl(value: string) {
+  const match = value.trim().match(/^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i);
+
+  if (!match) {
+    throw new Error("Saved media thumbnail is not a supported base64 image data URL.");
+  }
+
+  const contentType = match[1].toLowerCase();
+  const extension = contentType.includes("png") ? "png" : contentType.includes("webp") ? "webp" : "jpg";
+
+  return {
+    contentType,
+    extension,
+    buffer: Buffer.from(match[2], "base64"),
+  };
+}
+
+function uploadMetadataRecord(mediaAsset?: MediaAsset) {
+  return recordOf(mediaAsset?.metadata.upload_metadata);
+}
+
+function embeddedImageDataUrlForPublish(input: { item: ContentItem; mediaAsset?: MediaAsset }) {
+  return firstTextValue(
+    [
+      input.mediaAsset?.metadata,
+      uploadMetadataRecord(input.mediaAsset),
+      input.item.metadata,
+      recordOf(input.mediaAsset),
+    ],
+    ["thumbnail_data_url", "image_data_url", "preview_data_url"],
+  );
+}
+
+function storageObjectMetadataUrl(bucket: string, objectName: string) {
+  return `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(objectName)}`;
+}
+
+async function storageHeaders(hasBody = false) {
+  const token = await getServiceAccountAccessToken(firebaseStorageScope);
+
+  if (!token) {
+    throw new Error("Wildsaura Firebase service account credentials are required for storage upload fallback.");
+  }
+
+  return {
+    Authorization: `Bearer ${token}`,
+    ...(hasBody ? { "Content-Type": "application/json" } : {}),
+  };
+}
+
+async function uploadImageDataUrlToFirebaseStorage(input: {
+  dataUrl: string;
+  item: ContentItem;
+  mediaAsset?: MediaAsset;
+  collection: WebsitePublishCollection;
+}) {
+  const bucket = firebaseStorageBucket();
+
+  if (!bucket) {
+    throw new Error("Wildsaura Firebase Storage bucket is not configured.");
+  }
+
+  const parsed = parseImageDataUrl(input.dataUrl);
+
+  if (parsed.buffer.length <= 0) {
+    throw new Error("Saved media thumbnail is empty.");
+  }
+
+  const token = randomUUID();
+  const objectName = `ai-control-center/${input.collection}/${input.item.id}-${Date.now()}.${parsed.extension}`;
+  const uploadUrl = new URL(`https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(bucket)}/o`);
+
+  uploadUrl.searchParams.set("uploadType", "media");
+  uploadUrl.searchParams.set("name", objectName);
+
+  const uploadResponse = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      ...(await storageHeaders()),
+      "Content-Type": parsed.contentType,
+    },
+    body: parsed.buffer,
+    cache: "no-store",
+  });
+
+  if (!uploadResponse.ok) {
+    throw new Error(`Firebase Storage upload failed (${uploadResponse.status}): ${await uploadResponse.text()}`);
+  }
+
+  const uploaded = (await uploadResponse.json()) as { name?: string };
+  const uploadedName = uploaded.name || objectName;
+  const metadataResponse = await fetch(storageObjectMetadataUrl(bucket, uploadedName), {
+    method: "PATCH",
+    headers: await storageHeaders(true),
+    body: JSON.stringify({
+      contentType: parsed.contentType,
+      metadata: {
+        firebaseStorageDownloadTokens: token,
+        source: "ai_control_center",
+        content_item_id: input.item.id,
+        media_asset_id: input.mediaAsset?.id ?? "",
+      },
+    }),
+    cache: "no-store",
+  });
+
+  if (!metadataResponse.ok) {
+    throw new Error(`Firebase Storage metadata update failed (${metadataResponse.status}): ${await metadataResponse.text()}`);
+  }
+
+  return {
+    bucket,
+    objectName: uploadedName,
+    mediaUrl: `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(uploadedName)}?alt=media&token=${encodeURIComponent(token)}`,
+  };
 }
 
 function uniqueTags(values: string[]) {
@@ -728,16 +866,57 @@ async function executeWebsiteContentPublish(input: {
       routes: input.routes,
       mediaAsset: input.mediaAsset,
     });
-    const media = resolvePrimaryMediaUrl({
+    let media = resolvePrimaryMediaUrl({
       item: input.contentItem,
       mediaAsset: input.mediaAsset,
       collection,
     });
+    let storageFallback:
+      | {
+          bucket: string;
+          objectName: string;
+          mediaUrl: string;
+        }
+      | undefined;
+    let inlineDataUrlFallbackUsed = false;
+    let storageFallbackError = "";
 
     if (!media.mediaUrl) {
-      throw new Error(
-        `Cannot publish ${websiteCollectionLabel(collection)} to Wildsaura because no public media URL is available. Found "${media.rawMediaReference || "empty"}". Upload the file to Supabase/Firebase Storage or paste a public media URL before approving.`,
-      );
+      const embeddedImageDataUrl = embeddedImageDataUrlForPublish({
+        item: input.contentItem,
+        mediaAsset: input.mediaAsset,
+      });
+
+      if (collection === "videos" || !isImageDataUrl(embeddedImageDataUrl)) {
+        throw new Error(
+          `Cannot publish ${websiteCollectionLabel(collection)} to Wildsaura because no public media URL is available. Found "${media.rawMediaReference || "empty"}". Upload the file to Supabase/Firebase Storage or paste a public media URL before approving.`,
+        );
+      }
+
+      if (hasFirebaseServiceAccountCredentials()) {
+        try {
+          storageFallback = await uploadImageDataUrlToFirebaseStorage({
+            dataUrl: embeddedImageDataUrl,
+            item: input.contentItem,
+            mediaAsset: input.mediaAsset,
+            collection,
+          });
+        } catch (error) {
+          storageFallbackError = error instanceof Error ? error.message : "Firebase Storage upload failed.";
+          inlineDataUrlFallbackUsed = true;
+        }
+      }
+
+      if (!storageFallback) {
+        inlineDataUrlFallbackUsed = true;
+      }
+
+      media = {
+        ...media,
+        mediaUrl: storageFallback?.mediaUrl ?? embeddedImageDataUrl,
+        thumbnailUrl: storageFallback?.mediaUrl ?? embeddedImageDataUrl,
+        storagePath: storageFallback?.objectName ?? `inline-data-url/${input.contentItem.id}`,
+      };
     }
 
     const now = new Date().toISOString();
@@ -761,14 +940,20 @@ async function executeWebsiteContentPublish(input: {
     const document = await createFirestoreDocument(collection, documentData);
     const documentId = documentIdFromName(document.name);
     const routeIds = input.routes?.filter((route) => route.platform === "website").map((route) => route.id) ?? [];
+    const fallbackNote = inlineDataUrlFallbackUsed ? " using saved inline thumbnail fallback" : "";
 
     return {
       execution_status: "executed",
-      details: `Website ${websiteCollectionLabel(collection)} published to Wildsaura Firestore ${collection}/${documentId}.`,
+      details: `Website ${websiteCollectionLabel(collection)} published to Wildsaura Firestore ${collection}/${documentId}${fallbackNote}.`,
       log_action: "connector.website.publish_executed",
       metadata: {
         firestore_collection: collection,
         firestore_document_id: documentId,
+        firebase_storage_bucket: storageFallback?.bucket,
+        firebase_storage_object: storageFallback?.objectName,
+        firebase_storage_error: storageFallbackError,
+        firebase_storage_fallback_used: Boolean(storageFallback),
+        inline_data_url_fallback_used: inlineDataUrlFallbackUsed,
         content_item_id: input.contentItem.id,
         media_asset_id: input.mediaAsset?.id ?? "",
         website_route_ids: routeIds,
