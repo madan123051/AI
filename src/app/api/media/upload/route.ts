@@ -95,7 +95,7 @@ async function getStorageAccessToken() {
   const payload = base64Url(
     JSON.stringify({
       iss: serviceAccount.client_email,
-      scope: "https://www.googleapis.com/auth/devstorage.read_write",
+      scope: "https://www.googleapis.com/auth/devstorage.full_control",
       aud: "https://oauth2.googleapis.com/token",
       iat: now,
       exp: now + 3600,

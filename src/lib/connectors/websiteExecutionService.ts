@@ -44,7 +44,7 @@ type WebsiteMediaAnalysis = {
 };
 
 const firebaseDatastoreScope = "https://www.googleapis.com/auth/datastore";
-const firebaseStorageScope = "https://www.googleapis.com/auth/devstorage.read_write";
+const firebaseStorageScope = "https://www.googleapis.com/auth/devstorage.full_control";
 
 const cachedAccessTokens = new Map<string, { token: string; expiresAt: number }>();
 
