@@ -44,6 +44,13 @@ export const AI_MODEL_DEFINITIONS: AiModelDefinition[] = [
     defaultModel: "deepseek/deepseek-chat",
     envModelKey: "OPENROUTER_DEEPSEEK_MODEL",
   },
+  {
+    id: "local",
+    label: "Local AI",
+    provider: "LM Studio / Ollama",
+    defaultModel: "llama-3.1-8b-instruct",
+    envModelKey: "LOCAL_AI_MODEL",
+  },
 ];
 
 export interface AiHandoffInput {
@@ -60,7 +67,7 @@ export interface StructuredAiResult {
   response_summary: string;
   needs_review: boolean;
   raw_response?: string;
-  source: "openrouter" | "mock";
+  source: "openrouter" | "mock" | "local";
   model: string;
   cost_usd?: number;
   token_usage?: TokenUsage;
@@ -71,7 +78,7 @@ export interface AiAdapter {
   label: string;
   provider: string;
   modelName: string;
-  source: "openrouter" | "mock";
+  source: "openrouter" | "mock" | "local";
   continueTask(input: AiHandoffInput): Promise<StructuredAiResult>;
 }
 
@@ -81,6 +88,10 @@ export function getAiModelDefinition(modelId: AiModelId) {
 
 export function getConfiguredOpenRouterModel(definition: AiModelDefinition) {
   return process.env[definition.envModelKey]?.trim() || definition.defaultModel;
+}
+
+export function getConfiguredLocalAiModel(definition: AiModelDefinition) {
+  return process.env.LOCAL_AI_MODEL?.trim() || definition.defaultModel;
 }
 
 

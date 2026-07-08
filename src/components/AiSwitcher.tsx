@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, BrainCircuit, Cpu, SearchCode, Sparkles } from "lucide-react";
+import { Bot, BrainCircuit, Cpu, HardDrive, SearchCode, Sparkles } from "lucide-react";
 import { aiModels } from "@/lib/orchestrator/taskRunner";
 import type { AiModelId } from "@/lib/types";
 
@@ -10,6 +10,7 @@ const iconMap = {
   claude: Bot,
   codex: Cpu,
   deepseek: SearchCode,
+  local: HardDrive,
 } satisfies Record<AiModelId, typeof Sparkles>;
 
 interface AiSwitcherProps {

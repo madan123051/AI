@@ -51,6 +51,18 @@ function buildApprovalReason(aiResult: StructuredAiResult, ruleReason: string, s
   ].join(" ");
 }
 
+function getAiSourceLabel(aiResult: StructuredAiResult) {
+  if (aiResult.source === "mock") {
+    return "mock fallback";
+  }
+
+  if (aiResult.source === "local") {
+    return "Local AI";
+  }
+
+  return "OpenRouter";
+}
+
 interface ContinueArgs {
   task: Task;
   state: TaskState;
@@ -134,7 +146,7 @@ export async function continueTaskWithAi({ task, state, projectId, modelId, logs
       blocked ? "ai.action.blocked" : "ai.handoff.continued",
       blocked
         ? `${aiLabel} stopped because ${decision.reason}`
-        : `${aiLabel} continued from saved handoff via ${aiResult.source === "mock" ? "mock fallback" : "OpenRouter"}.`,
+        : `${aiLabel} continued from saved handoff via ${getAiSourceLabel(aiResult)}.`,
     ),
     handoff: handoffForRun,
     approval: needsReview

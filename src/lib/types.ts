@@ -1,5 +1,5 @@
 export type TaskStatus = "queued" | "in_progress" | "needs_review" | "completed" | "blocked";
-export type AiModelId = "gpt" | "gemini" | "claude" | "codex" | "deepseek";
+export type AiModelId = "gpt" | "gemini" | "claude" | "codex" | "deepseek" | "local";
 export type Priority = "low" | "medium" | "high";
 export type ApprovalStatus = "pending" | "approved" | "rejected";
 export type ApprovalActionType = "reply_comment" | "reply_message" | "send_email" | "publish_content" | "update_content";
