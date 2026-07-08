@@ -98,6 +98,11 @@ type DraftAsset = {
   file_name: string;
   mime_type: string;
   size: number;
+  original_file_name: string;
+  original_mime_type: string;
+  original_size: number;
+  compressed_to_webp: boolean;
+  compression_note: string;
   asset_type: MediaAssetType;
   preview_url: string;
   thumbnail_data_url: string;
@@ -133,6 +138,15 @@ type UploadFeedback = {
   tone: "info" | "success" | "warning" | "error";
   message: string;
 } | null;
+
+type PreparedUploadFile = {
+  file: File;
+  original_file_name: string;
+  original_mime_type: string;
+  original_size: number;
+  compressed_to_webp: boolean;
+  compression_note: string;
+};
 
 type PublisherRouteTarget =
   | "website_photo"
@@ -212,7 +226,9 @@ const routeTargets: Array<{
   },
 ];
 
-const embeddedImageFallbackLimitBytes = 8 * 1024 * 1024;
+const maxCompressedImageBytes = 5 * 1024 * 1024;
+const targetCompressedImageBytes = Math.floor(4.2 * 1024 * 1024);
+const embeddedImageFallbackLimitBytes = maxCompressedImageBytes;
 
 const aiActions: Array<{ action: PublisherMediaAiAction; label: string }> = [
   { action: "generate_caption", label: "Caption" },
@@ -233,6 +249,12 @@ function createLocalId() {
 
 function safeFileName(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "media-file";
+}
+
+function webpFileName(name: string) {
+  const baseName = safeFileName(name.replace(/\.[^.]+$/, ""));
+
+  return `${baseName || "media-file"}.webp`;
 }
 
 function errorMessage(error: unknown) {
@@ -436,6 +458,30 @@ function readFileAsDataUrl(file: File) {
   });
 }
 
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality: number) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) {
+          resolve(blob);
+          return;
+        }
+
+        reject(new Error("Could not compress image."));
+      },
+      type,
+      quality,
+    );
+  });
+}
+
+function fileFromBlob(blob: Blob, fileName: string) {
+  return new File([blob], fileName, {
+    type: blob.type || "image/webp",
+    lastModified: Date.now(),
+  });
+}
+
 async function uploadOriginalMediaFile(projectId: string, draft: DraftAsset) {
   const formData = new FormData();
 
@@ -489,6 +535,95 @@ function loadImage(src: string) {
     image.onerror = () => reject(new Error("Could not generate image thumbnail."));
     image.src = src;
   });
+}
+
+async function compressImageToWebp(file: File): Promise<PreparedUploadFile> {
+  if (!file.type.startsWith("image/")) {
+    return {
+      file,
+      original_file_name: file.name,
+      original_mime_type: file.type || "application/octet-stream",
+      original_size: file.size,
+      compressed_to_webp: false,
+      compression_note: "",
+    };
+  }
+
+  const sourceUrl = URL.createObjectURL(file);
+
+  try {
+    const image = await loadImage(sourceUrl);
+    const sourceWidth = image.naturalWidth || image.width;
+    const sourceHeight = image.naturalHeight || image.height;
+
+    if (!sourceWidth || !sourceHeight) {
+      throw new Error(`Could not read image dimensions for ${file.name}.`);
+    }
+
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      throw new Error("Image compression is not available in this browser.");
+    }
+
+    let scale = Math.min(1, 3200 / Math.max(sourceWidth, sourceHeight));
+    let quality = 0.88;
+    let bestBlob: Blob | undefined;
+
+    for (let attempt = 0; attempt < 18; attempt += 1) {
+      const width = Math.max(1, Math.round(sourceWidth * scale));
+      const height = Math.max(1, Math.round(sourceHeight * scale));
+
+      canvas.width = width;
+      canvas.height = height;
+      context.clearRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+
+      const blob = await canvasToBlob(canvas, "image/webp", quality);
+
+      if (!bestBlob || blob.size < bestBlob.size) {
+        bestBlob = blob;
+      }
+
+      if (blob.size <= targetCompressedImageBytes) {
+        const webpFile = fileFromBlob(blob, webpFileName(file.name));
+
+        return {
+          file: webpFile,
+          original_file_name: file.name,
+          original_mime_type: file.type || "application/octet-stream",
+          original_size: file.size,
+          compressed_to_webp: true,
+          compression_note: `${formatBytes(file.size)} -> ${formatBytes(webpFile.size)} WebP`,
+        };
+      }
+
+      if (quality > 0.54) {
+        quality = Math.max(0.54, quality - 0.08);
+      } else {
+        scale *= 0.82;
+        quality = 0.82;
+      }
+    }
+
+    if (bestBlob && bestBlob.size <= maxCompressedImageBytes) {
+      const webpFile = fileFromBlob(bestBlob, webpFileName(file.name));
+
+      return {
+        file: webpFile,
+        original_file_name: file.name,
+        original_mime_type: file.type || "application/octet-stream",
+        original_size: file.size,
+        compressed_to_webp: true,
+        compression_note: `${formatBytes(file.size)} -> ${formatBytes(webpFile.size)} WebP`,
+      };
+    }
+
+    throw new Error(`Could not compress ${file.name} under ${formatBytes(maxCompressedImageBytes)}.`);
+  } finally {
+    URL.revokeObjectURL(sourceUrl);
+  }
 }
 
 async function createImageThumbnailDataUrl(file: File) {
@@ -752,38 +887,60 @@ export function PublisherDashboardPanel({
     .filter((route): route is (typeof routeTargets)[number] => Boolean(route));
 
   async function addFiles(files: FileList | File[]) {
-    const nextDrafts = await Promise.all(Array.from(files).map(async (file) => {
-      const assetType: MediaAssetType = file.type.startsWith("video/")
-        ? "video"
-        : file.type.startsWith("image/")
-          ? "image"
-          : "other";
-      const previewUrl = assetType === "image" || assetType === "video" ? URL.createObjectURL(file) : "";
+    const nextDrafts: DraftAsset[] = [];
 
-      if (previewUrl) {
-        previewUrls.current.push(previewUrl);
+    setUploadFeedback({ tone: "info", message: "Preparing media and compressing images to WebP under 5 MB..." });
+
+    try {
+      for (const file of Array.from(files)) {
+        const assetType: MediaAssetType = file.type.startsWith("video/")
+          ? "video"
+          : file.type.startsWith("image/")
+            ? "image"
+            : "other";
+        const prepared = await compressImageToWebp(file);
+        const previewUrl = assetType === "image" || assetType === "video" ? URL.createObjectURL(prepared.file) : "";
+
+        nextDrafts.push({
+          id: createLocalId(),
+          file: prepared.file,
+          file_name: prepared.file.name,
+          mime_type: prepared.file.type || "application/octet-stream",
+          size: prepared.file.size,
+          original_file_name: prepared.original_file_name,
+          original_mime_type: prepared.original_mime_type,
+          original_size: prepared.original_size,
+          compressed_to_webp: prepared.compressed_to_webp,
+          compression_note: prepared.compression_note,
+          asset_type: assetType,
+          preview_url: previewUrl,
+          thumbnail_data_url: await createImageThumbnailDataUrl(prepared.file).catch(() => ""),
+          title: titleFromFileName(file.name),
+          description: "",
+          tags: "",
+          license: "Wildsaura",
+          credit: "Wildsaura",
+          notes: "",
+        });
       }
 
-      return {
-        id: createLocalId(),
-        file,
-        file_name: file.name,
-        mime_type: file.type || "application/octet-stream",
-        size: file.size,
-        asset_type: assetType,
-        preview_url: previewUrl,
-        thumbnail_data_url: await createImageThumbnailDataUrl(file).catch(() => ""),
-        title: titleFromFileName(file.name),
-        description: "",
-        tags: "",
-        license: "Wildsaura",
-        credit: "Wildsaura",
-        notes: "",
-      };
-    }));
+      previewUrls.current.push(...nextDrafts.map((draft) => draft.preview_url).filter(Boolean));
+      setDrafts((current) => [...current, ...nextDrafts]);
 
-    setDrafts((current) => [...current, ...nextDrafts]);
-    setUploadFeedback(null);
+      const compressedCount = nextDrafts.filter((draft) => draft.compressed_to_webp).length;
+      setUploadFeedback(
+        compressedCount > 0
+          ? { tone: "success", message: `Compressed ${compressedCount} image(s) to WebP under 5 MB. Ready to upload.` }
+          : null,
+      );
+    } catch (error) {
+      nextDrafts.forEach((draft) => {
+        if (draft.preview_url) {
+          URL.revokeObjectURL(draft.preview_url);
+        }
+      });
+      setUploadFeedback({ tone: "error", message: `Could not prepare media: ${errorMessage(error)}` });
+    }
   }
 
   function handleFileInput(event: ChangeEvent<HTMLInputElement>) {
@@ -858,9 +1015,14 @@ export function PublisherDashboardPanel({
           tags: splitTags(draft.tags),
           status: "draft",
           upload_metadata: {
-            original_filename: upload.original_filename ?? draft.file_name,
+            original_filename: draft.original_file_name,
+            uploaded_filename: upload.original_filename ?? draft.file_name,
             mime_type: upload.mime_type ?? draft.mime_type,
             file_size: String(upload.file_size ?? draft.size),
+            original_mime_type: draft.original_mime_type,
+            original_file_size: String(draft.original_size),
+            compressed_to_webp: draft.compressed_to_webp ? "true" : "false",
+            compression_note: draft.compression_note,
             license: draft.license.trim(),
             credit: draft.credit.trim(),
             storage_mode: upload.storage_mode,
@@ -1068,6 +1230,11 @@ export function PublisherDashboardPanel({
                           <div className="min-w-0">
                             <p className="truncate text-sm font-semibold text-zinc-100">{draft.file_name}</p>
                             <p className="mt-1 text-xs text-zinc-500">{formatBytes(draft.size)}</p>
+                            {draft.compressed_to_webp ? (
+                              <p className="mt-1 text-xs text-emerald-300">
+                                WebP compressed from {draft.original_file_name} ({formatBytes(draft.original_size)})
+                              </p>
+                            ) : null}
                           </div>
                           <button
                             type="button"
