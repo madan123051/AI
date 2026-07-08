@@ -426,15 +426,21 @@ function uploadMetadataRecord(mediaAsset?: MediaAsset) {
 }
 
 function embeddedImageDataUrlForPublish(input: { item: ContentItem; mediaAsset?: MediaAsset }) {
-  return firstTextValue(
-    [
-      input.mediaAsset?.metadata,
-      uploadMetadataRecord(input.mediaAsset),
-      input.item.metadata,
-      recordOf(input.mediaAsset),
-    ],
-    ["thumbnail_data_url", "image_data_url", "preview_data_url"],
-  );
+  const records = [
+    input.mediaAsset?.metadata,
+    uploadMetadataRecord(input.mediaAsset),
+    input.item.metadata,
+    recordOf(input.mediaAsset),
+  ];
+  const fullSizeDataUrl = firstTextValue(records, ["image_data_url", "preview_data_url"]);
+
+  if (fullSizeDataUrl) {
+    return { dataUrl: fullSizeDataUrl, kind: "full_size_data_url" as const };
+  }
+
+  const thumbnailDataUrl = firstTextValue(records, ["thumbnail_data_url"]);
+
+  return thumbnailDataUrl ? { dataUrl: thumbnailDataUrl, kind: "thumbnail_data_url" as const } : undefined;
 }
 
 function storageObjectMetadataUrl(bucket: string, objectName: string) {
@@ -878,44 +884,48 @@ async function executeWebsiteContentPublish(input: {
           mediaUrl: string;
         }
       | undefined;
-    let inlineDataUrlFallbackUsed = false;
     let storageFallbackError = "";
 
     if (!media.mediaUrl) {
-      const embeddedImageDataUrl = embeddedImageDataUrlForPublish({
+      const embeddedImage = embeddedImageDataUrlForPublish({
         item: input.contentItem,
         mediaAsset: input.mediaAsset,
       });
 
-      if (collection === "videos" || !isImageDataUrl(embeddedImageDataUrl)) {
+      if (collection === "videos" || !embeddedImage || !isImageDataUrl(embeddedImage.dataUrl)) {
         throw new Error(
           `Cannot publish ${websiteCollectionLabel(collection)} to Wildsaura because no public media URL is available. Found "${media.rawMediaReference || "empty"}". Upload the file to Supabase/Firebase Storage or paste a public media URL before approving.`,
+        );
+      }
+
+      if (embeddedImage.kind === "thumbnail_data_url" && process.env.ALLOW_THUMBNAIL_PUBLISH_FALLBACK !== "true") {
+        throw new Error(
+          `Cannot publish ${websiteCollectionLabel(collection)} to Wildsaura because only a generated thumbnail is saved. Upload the original file to AI Center/Firebase Storage before approving.`,
         );
       }
 
       if (hasFirebaseServiceAccountCredentials()) {
         try {
           storageFallback = await uploadImageDataUrlToFirebaseStorage({
-            dataUrl: embeddedImageDataUrl,
+            dataUrl: embeddedImage.dataUrl,
             item: input.contentItem,
             mediaAsset: input.mediaAsset,
             collection,
           });
         } catch (error) {
           storageFallbackError = error instanceof Error ? error.message : "Firebase Storage upload failed.";
-          inlineDataUrlFallbackUsed = true;
         }
       }
 
       if (!storageFallback) {
-        inlineDataUrlFallbackUsed = true;
+        throw new Error(storageFallbackError || "Cannot publish media because Firebase Storage upload did not return a public URL.");
       }
 
       media = {
         ...media,
-        mediaUrl: storageFallback?.mediaUrl ?? embeddedImageDataUrl,
-        thumbnailUrl: storageFallback?.mediaUrl ?? embeddedImageDataUrl,
-        storagePath: storageFallback?.objectName ?? `inline-data-url/${input.contentItem.id}`,
+        mediaUrl: storageFallback.mediaUrl,
+        thumbnailUrl: storageFallback.mediaUrl,
+        storagePath: storageFallback.objectName,
       };
     }
 
@@ -940,11 +950,10 @@ async function executeWebsiteContentPublish(input: {
     const document = await createFirestoreDocument(collection, documentData);
     const documentId = documentIdFromName(document.name);
     const routeIds = input.routes?.filter((route) => route.platform === "website").map((route) => route.id) ?? [];
-    const fallbackNote = inlineDataUrlFallbackUsed ? " using saved inline thumbnail fallback" : "";
 
     return {
       execution_status: "executed",
-      details: `Website ${websiteCollectionLabel(collection)} published to Wildsaura Firestore ${collection}/${documentId}${fallbackNote}.`,
+      details: `Website ${websiteCollectionLabel(collection)} published to Wildsaura Firestore ${collection}/${documentId}.`,
       log_action: "connector.website.publish_executed",
       metadata: {
         firestore_collection: collection,
@@ -953,7 +962,7 @@ async function executeWebsiteContentPublish(input: {
         firebase_storage_object: storageFallback?.objectName,
         firebase_storage_error: storageFallbackError,
         firebase_storage_fallback_used: Boolean(storageFallback),
-        inline_data_url_fallback_used: inlineDataUrlFallbackUsed,
+        inline_data_url_fallback_used: false,
         content_item_id: input.contentItem.id,
         media_asset_id: input.mediaAsset?.id ?? "",
         website_route_ids: routeIds,

@@ -45,6 +45,7 @@ export const config = {
     "/api/approvals/:path*",
     "/api/connectors/email/test",
     "/api/handoff/:path*",
+    "/api/media/:path*",
     "/api/tasks/:path*",
   ],
 };

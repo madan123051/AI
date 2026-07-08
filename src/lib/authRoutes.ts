@@ -21,6 +21,7 @@ export const privateApiRoutes = [
   "/api/approvals",
   "/api/connectors/email/test",
   "/api/handoff",
+  "/api/media",
   "/api/tasks",
 ];
 

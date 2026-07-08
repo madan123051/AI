@@ -94,6 +94,7 @@ type PublisherDashboardPanelProps = {
 
 type DraftAsset = {
   id: string;
+  file: File;
   file_name: string;
   mime_type: string;
   size: number;
@@ -106,6 +107,18 @@ type DraftAsset = {
   license: string;
   credit: string;
   notes: string;
+};
+
+type MediaUploadResponse = {
+  ok?: boolean;
+  error?: string;
+  source_url?: string;
+  storage_path?: string;
+  bucket?: string;
+  original_filename?: string;
+  mime_type?: string;
+  file_size?: number;
+  storage_mode?: string;
 };
 
 type PublisherRouteTarget =
@@ -386,6 +399,25 @@ function readFileAsDataUrl(file: File) {
     reader.onerror = () => reject(reader.error ?? new Error("Could not read file."));
     reader.readAsDataURL(file);
   });
+}
+
+async function uploadOriginalMediaFile(projectId: string, draft: DraftAsset) {
+  const formData = new FormData();
+
+  formData.set("projectId", projectId);
+  formData.set("file", draft.file, draft.file_name);
+
+  const response = await fetch("/api/media/upload", {
+    method: "POST",
+    body: formData,
+  });
+  const payload = (await response.json().catch(() => ({}))) as MediaUploadResponse;
+
+  if (!response.ok || !payload.ok || !payload.source_url || !payload.storage_path) {
+    throw new Error(payload.error || `Could not upload ${draft.file_name} to Firebase Storage.`);
+  }
+
+  return payload;
 }
 
 function loadImage(src: string) {
@@ -671,6 +703,7 @@ export function PublisherDashboardPanel({
 
       return {
         id: createLocalId(),
+        file,
         file_name: file.name,
         mime_type: file.type || "application/octet-stream",
         size: file.size,
@@ -727,23 +760,33 @@ export function PublisherDashboardPanel({
       return;
     }
 
+    const uploadedDrafts = await Promise.all(
+      drafts.map(async (draft) => ({
+        draft,
+        upload: await uploadOriginalMediaFile(project.id, draft),
+      })),
+    );
+
     await onBulkCreateAssets(
-      drafts.map((draft) => ({
+      uploadedDrafts.map(({ draft, upload }) => ({
         projectId: project.id,
         title: draft.title.trim() || titleFromFileName(draft.file_name),
         asset_type: draft.asset_type,
-        source_url: "",
-        storage_path: `local-placeholder/${Date.now()}-${safeFileName(draft.file_name)}`,
+        source_url: upload.source_url ?? "",
+        storage_path: upload.storage_path ?? `firebase-storage/${Date.now()}-${safeFileName(draft.file_name)}`,
         alt_text: draft.description.trim() || draft.title.trim() || draft.file_name,
         tags: splitTags(draft.tags),
         status: "draft",
         upload_metadata: {
-          original_filename: draft.file_name,
-          mime_type: draft.mime_type,
-          file_size: String(draft.size),
+          original_filename: upload.original_filename ?? draft.file_name,
+          mime_type: upload.mime_type ?? draft.mime_type,
+          file_size: String(upload.file_size ?? draft.size),
           license: draft.license.trim(),
           credit: draft.credit.trim(),
-          storage_mode: "local_placeholder",
+          storage_mode: upload.storage_mode ?? "firebase_storage",
+          firebase_storage_bucket: upload.bucket ?? "",
+          firebase_storage_path: upload.storage_path ?? "",
+          public_url: upload.source_url ?? "",
           thumbnail_data_url: draft.thumbnail_data_url,
           thumbnail_kind: draft.thumbnail_data_url ? "client_generated" : "",
         },
@@ -877,7 +920,7 @@ export function PublisherDashboardPanel({
                 <p className="mt-1 text-sm text-zinc-400">{project?.name ?? "Select a project"} media pipeline</p>
               </div>
               <span className="inline-flex min-h-8 items-center justify-center rounded-lg border border-zinc-700 px-3 text-xs font-medium text-zinc-300">
-                Storage ready, using placeholders
+                Firebase Storage originals
               </span>
             </div>
 
@@ -999,7 +1042,7 @@ export function PublisherDashboardPanel({
                 className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-emerald-400 px-3 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                Save Media Assets
+                Upload & Save Media
               </button>
             </div>
           </article>
