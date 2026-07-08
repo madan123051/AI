@@ -121,6 +121,19 @@ type MediaUploadResponse = {
   storage_mode?: string;
 };
 
+type ResolvedMediaUpload = MediaUploadResponse & {
+  source_url: string;
+  storage_path: string;
+  storage_mode: string;
+  upload_error?: string;
+  image_data_url?: string;
+};
+
+type UploadFeedback = {
+  tone: "info" | "success" | "warning" | "error";
+  message: string;
+} | null;
+
 type PublisherRouteTarget =
   | "website_photo"
   | "website_story"
@@ -199,6 +212,8 @@ const routeTargets: Array<{
   },
 ];
 
+const embeddedImageFallbackLimitBytes = 8 * 1024 * 1024;
+
 const aiActions: Array<{ action: PublisherMediaAiAction; label: string }> = [
   { action: "generate_caption", label: "Caption" },
   { action: "generate_hashtags", label: "Hashtags" },
@@ -218,6 +233,26 @@ function createLocalId() {
 
 function safeFileName(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "media-file";
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Something went wrong.";
+}
+
+function uploadFeedbackClass(tone: NonNullable<UploadFeedback>["tone"]) {
+  if (tone === "success") {
+    return "border-emerald-500/30 bg-emerald-500/10 text-emerald-100";
+  }
+
+  if (tone === "warning") {
+    return "border-amber-500/30 bg-amber-500/10 text-amber-100";
+  }
+
+  if (tone === "error") {
+    return "border-rose-500/30 bg-rose-500/10 text-rose-100";
+  }
+
+  return "border-sky-500/30 bg-sky-500/10 text-sky-100";
 }
 
 function titleFromFileName(name: string) {
@@ -420,6 +455,32 @@ async function uploadOriginalMediaFile(projectId: string, draft: DraftAsset) {
   return payload;
 }
 
+async function buildPendingStorageUpload(draft: DraftAsset, uploadError: unknown): Promise<ResolvedMediaUpload> {
+  const message = errorMessage(uploadError);
+
+  if (!draft.mime_type.startsWith("image/")) {
+    throw new Error(`${message} Video uploads need Firebase Storage before they can be saved from Publisher.`);
+  }
+
+  if (draft.size > embeddedImageFallbackLimitBytes) {
+    throw new Error(
+      `${message} ${draft.file_name} is too large for browser fallback. Configure Firebase Storage upload, then try again.`,
+    );
+  }
+
+  return {
+    ok: true,
+    source_url: "",
+    storage_path: `browser-embedded/${Date.now()}-${safeFileName(draft.file_name)}`,
+    original_filename: draft.file_name,
+    mime_type: draft.mime_type,
+    file_size: draft.size,
+    storage_mode: "browser_embedded_pending_storage",
+    upload_error: message,
+    image_data_url: await readFileAsDataUrl(draft.file),
+  };
+}
+
 function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image();
@@ -545,6 +606,8 @@ export function PublisherDashboardPanel({
   const [statusFilter, setStatusFilter] = useState<"all" | MediaAssetStatus>("all");
   const [platformFilter, setPlatformFilter] = useState<"all" | ContentPlatform>("all");
   const [contentStatusFilter, setContentStatusFilter] = useState<"all" | ContentStatus>("all");
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadFeedback, setUploadFeedback] = useState<UploadFeedback>(null);
   const [selectedRoutes, setSelectedRoutes] = useState<PublisherRouteTarget[]>([
     "website_photo",
     "instagram_post",
@@ -720,6 +783,7 @@ export function PublisherDashboardPanel({
     }));
 
     setDrafts((current) => [...current, ...nextDrafts]);
+    setUploadFeedback(null);
   }
 
   function handleFileInput(event: ChangeEvent<HTMLInputElement>) {
@@ -756,50 +820,81 @@ export function PublisherDashboardPanel({
   }
 
   async function handleUploadDrafts() {
-    if (!project || drafts.length === 0) {
+    if (!project || drafts.length === 0 || isUploading) {
       return;
     }
 
-    const uploadedDrafts = await Promise.all(
-      drafts.map(async (draft) => ({
-        draft,
-        upload: await uploadOriginalMediaFile(project.id, draft),
-      })),
-    );
+    const draftsToSave = drafts;
 
-    await onBulkCreateAssets(
-      uploadedDrafts.map(({ draft, upload }) => ({
-        projectId: project.id,
-        title: draft.title.trim() || titleFromFileName(draft.file_name),
-        asset_type: draft.asset_type,
-        source_url: upload.source_url ?? "",
-        storage_path: upload.storage_path ?? `firebase-storage/${Date.now()}-${safeFileName(draft.file_name)}`,
-        alt_text: draft.description.trim() || draft.title.trim() || draft.file_name,
-        tags: splitTags(draft.tags),
-        status: "draft",
-        upload_metadata: {
-          original_filename: upload.original_filename ?? draft.file_name,
-          mime_type: upload.mime_type ?? draft.mime_type,
-          file_size: String(upload.file_size ?? draft.size),
-          license: draft.license.trim(),
-          credit: draft.credit.trim(),
-          storage_mode: upload.storage_mode ?? "firebase_storage",
-          firebase_storage_bucket: upload.bucket ?? "",
-          firebase_storage_path: upload.storage_path ?? "",
-          public_url: upload.source_url ?? "",
-          thumbnail_data_url: draft.thumbnail_data_url,
-          thumbnail_kind: draft.thumbnail_data_url ? "client_generated" : "",
-        },
-        notes: draft.notes.trim(),
-      })),
-    );
-    drafts.forEach((draft) => {
-      if (draft.preview_url) {
-        URL.revokeObjectURL(draft.preview_url);
-      }
-    });
-    previewUrls.current = previewUrls.current.filter((url) => drafts.every((draft) => draft.preview_url !== url));
-    setDrafts([]);
+    setIsUploading(true);
+    setUploadFeedback({ tone: "info", message: `Uploading ${draftsToSave.length} file(s) and saving media metadata...` });
+
+    try {
+      const uploadedDrafts = await Promise.all(
+        draftsToSave.map(async (draft) => {
+          try {
+            return {
+              draft,
+              upload: (await uploadOriginalMediaFile(project.id, draft)) as ResolvedMediaUpload,
+            };
+          } catch (error) {
+            return {
+              draft,
+              upload: await buildPendingStorageUpload(draft, error),
+            };
+          }
+        }),
+      );
+      const fallbackCount = uploadedDrafts.filter(({ upload }) => upload.storage_mode === "browser_embedded_pending_storage").length;
+
+      await onBulkCreateAssets(
+        uploadedDrafts.map(({ draft, upload }) => ({
+          projectId: project.id,
+          title: draft.title.trim() || titleFromFileName(draft.file_name),
+          asset_type: draft.asset_type,
+          source_url: upload.source_url,
+          storage_path: upload.storage_path,
+          alt_text: draft.description.trim() || draft.title.trim() || draft.file_name,
+          tags: splitTags(draft.tags),
+          status: "draft",
+          upload_metadata: {
+            original_filename: upload.original_filename ?? draft.file_name,
+            mime_type: upload.mime_type ?? draft.mime_type,
+            file_size: String(upload.file_size ?? draft.size),
+            license: draft.license.trim(),
+            credit: draft.credit.trim(),
+            storage_mode: upload.storage_mode,
+            firebase_storage_bucket: upload.bucket ?? "",
+            firebase_storage_path: upload.storage_path,
+            public_url: upload.source_url,
+            upload_error: upload.upload_error ?? "",
+            needs_server_storage_upload: upload.storage_mode === "browser_embedded_pending_storage" ? "true" : "false",
+            image_data_url: upload.image_data_url ?? "",
+            thumbnail_data_url: draft.thumbnail_data_url,
+            thumbnail_kind: draft.thumbnail_data_url ? "client_generated" : "",
+          },
+          notes: draft.notes.trim(),
+        })),
+      );
+      draftsToSave.forEach((draft) => {
+        if (draft.preview_url) {
+          URL.revokeObjectURL(draft.preview_url);
+        }
+      });
+      previewUrls.current = previewUrls.current.filter((url) => draftsToSave.every((draft) => draft.preview_url !== url));
+      setDrafts((current) => current.filter((draft) => draftsToSave.every((savedDraft) => savedDraft.id !== draft.id)));
+      setUploadFeedback({
+        tone: fallbackCount > 0 ? "warning" : "success",
+        message:
+          fallbackCount > 0
+            ? `Saved ${draftsToSave.length} media asset(s). ${fallbackCount} image(s) are waiting for server storage upload during publish approval.`
+            : `Saved ${draftsToSave.length} media asset(s) with Firebase Storage originals.`,
+      });
+    } catch (error) {
+      setUploadFeedback({ tone: "error", message: `Upload not saved: ${errorMessage(error)}` });
+    } finally {
+      setIsUploading(false);
+    }
   }
 
   function toggleAsset(assetId: string) {
@@ -950,7 +1045,7 @@ export function PublisherDashboardPanel({
                 multiple
                 onChange={handleFileInput}
                 className="sr-only"
-                disabled={!project || isSaving}
+                disabled={!project || isSaving || isUploading}
               />
             </label>
 
@@ -977,6 +1072,7 @@ export function PublisherDashboardPanel({
                           <button
                             type="button"
                             onClick={() => removeDraft(draft.id)}
+                            disabled={isUploading}
                             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-zinc-700 text-zinc-400 transition hover:border-rose-300 hover:text-rose-100"
                             aria-label={`Remove ${draft.file_name}`}
                           >
@@ -1033,16 +1129,22 @@ export function PublisherDashboardPanel({
               </div>
             ) : null}
 
+            {uploadFeedback ? (
+              <div className={`mt-4 rounded-lg border px-3 py-2 text-sm ${uploadFeedbackClass(uploadFeedback.tone)}`}>
+                {uploadFeedback.message}
+              </div>
+            ) : null}
+
             <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm text-zinc-500">{drafts.length} file(s) staged</p>
               <button
                 type="button"
                 onClick={() => void handleUploadDrafts()}
-                disabled={!project || isSaving || drafts.length === 0}
+                disabled={!project || isSaving || isUploading || drafts.length === 0}
                 className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-emerald-400 px-3 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                Upload & Save Media
+                {isUploading ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" /> : <CheckCircle2 className="h-4 w-4" aria-hidden="true" />}
+                {isUploading ? "Uploading..." : "Upload & Save Media"}
               </button>
             </div>
           </article>

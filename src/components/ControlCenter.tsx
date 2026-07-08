@@ -1095,6 +1095,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
       }));
     } catch (error) {
       setLoadError(getErrorMessage(error));
+      throw error;
     } finally {
       setIsSaving(false);
     }
