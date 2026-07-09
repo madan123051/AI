@@ -30,6 +30,7 @@ export const config = {
     "/projects/:path*",
     "/tasks/:path*",
     "/inbox/:path*",
+    "/chat/:path*",
     "/publisher/:path*",
     "/media/:path*",
     "/connectors/:path*",
@@ -43,9 +44,9 @@ export const config = {
     "/automation/:path*",
     "/api/ai/:path*",
     "/api/approvals/:path*",
+    "/api/chat/:path*",
     "/api/connectors/email/test",
     "/api/handoff/:path*",
-    "/api/media/:path*",
     "/api/tasks/:path*",
   ],
 };

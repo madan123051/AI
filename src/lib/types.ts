@@ -22,6 +22,19 @@ export type WebsiteControlAction = "create" | "update" | "delete" | "publish" | 
 export type AutomationStatus = "active" | "paused";
 export type AutomationTrigger = "daily_report" | "new_message" | "content_scheduled" | "handoff_completed" | "approval_pending";
 export type AutomationAction = "create_task" | "draft_reply" | "generate_report" | "notify_user" | "draft_content";
+export type ChatThreadStatus = "active" | "archived";
+export type ChatMessageRole = "user" | "assistant" | "tool" | "system";
+export type ChatToolName =
+  | "search_tasks"
+  | "summarize_inbox"
+  | "create_task"
+  | "draft_reply"
+  | "review_media"
+  | "generate_content_ideas"
+  | "schedule_content"
+  | "list_pending_approvals"
+  | "open_project_context"
+  | "generate_handoff";
 
 export interface ConnectorExecutionResult {
   execution_status: ApprovalExecutionStatus;
@@ -319,6 +332,46 @@ export interface AutomationRule {
   last_run_at?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface ChatThread {
+  id: string;
+  project_id?: string;
+  title: string;
+  model_id: AiModelId;
+  status: ChatThreadStatus;
+  pinned?: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatToolCall {
+  id: string;
+  name: ChatToolName | "approval_required" | "blocked_tool";
+  arguments: Record<string, unknown>;
+  reason: string;
+}
+
+export interface ChatToolResult {
+  id: string;
+  name: ChatToolCall["name"];
+  status: "success" | "approval_required" | "blocked" | "error";
+  title: string;
+  summary: string;
+  data: Record<string, unknown>;
+}
+
+export interface ChatMessage {
+  id: string;
+  thread_id: string;
+  role: ChatMessageRole;
+  content: string;
+  model_id?: AiModelId;
+  tool_name?: string;
+  tool_call?: ChatToolCall;
+  tool_result?: ChatToolResult;
+  metadata: Record<string, unknown>;
+  created_at: string;
 }
 
 export interface ControlCenterData {

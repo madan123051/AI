@@ -19,6 +19,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MessageSquareText,
   PanelLeftClose,
   PanelLeftOpen,
   Plug,
@@ -41,6 +42,7 @@ export type AppView =
   | "projects"
   | "tasks"
   | "inbox"
+  | "chat"
   | "ai-brain"
   | "content"
   | "media"
@@ -77,6 +79,7 @@ const navItems: Array<{ href: string; label: string; view: AppView; icon: typeof
   { href: "/projects", label: "Projects", view: "projects", icon: FolderKanban },
   { href: "/tasks", label: "Tasks", view: "tasks", icon: CheckSquare },
   { href: "/inbox", label: "Inbox", view: "inbox", icon: Inbox },
+  { href: "/chat", label: "AI Chat", view: "chat", icon: MessageSquareText },
   { href: "/ai-brain", label: "AI Brain", view: "ai-brain", icon: BrainCircuit },
   { href: "/content", label: "Content", view: "content", icon: CalendarDays },
   { href: "/media", label: "Media", view: "media", icon: ImageIcon },

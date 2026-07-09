@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { Activity, AlertTriangle, Archive, Bell, CalendarDays, Clock3, Coins, Database, FolderKanban, History, Inbox, Layers3, PanelRightOpen, Plus, RefreshCw, RotateCcw, Save, Sigma, Trash2, Workflow, X, Zap } from "lucide-react";
+import { Activity, AlertTriangle, Archive, Bell, CalendarDays, Clock3, Coins, Database, FolderKanban, History, Inbox, PanelRightOpen, Plus, RefreshCw, RotateCcw, Save, Sigma, Trash2, Workflow, X, Zap } from "lucide-react";
 import { AiRunHistory } from "@/components/AiRunHistory";
 import { AiSwitcher } from "@/components/AiSwitcher";
 import { AnalyticsPanel } from "@/components/AnalyticsPanel";
 import { AppShell, type AppView } from "@/components/AppShell";
 import { ApprovalQueue } from "@/components/ApprovalQueue";
 import { AutomationPanel } from "@/components/AutomationPanel";
+import { ChatCommandCenterPanel } from "@/components/ChatCommandCenterPanel";
 import { ConnectorManagerPanel } from "@/components/ConnectorManagerPanel";
 import { ContentCalendarPanel } from "@/components/ContentCalendarPanel";
 import { GlobalSearch, type SearchEntry } from "@/components/GlobalSearch";
@@ -120,6 +121,7 @@ const viewConfig: Record<AppView, { title: string; subtitle: string }> = {
   projects: { title: "Projects", subtitle: "Workspaces and lifecycle" },
   tasks: { title: "Tasks", subtitle: "Stateful AI work queue" },
   inbox: { title: "Inbox", subtitle: "Unified message intake" },
+  chat: { title: "AI Chat", subtitle: "Command center and safe tools" },
   "ai-brain": { title: "AI Brain", subtitle: "Handoff and model control" },
   content: { title: "Content", subtitle: "Calendar and routing" },
   media: { title: "Media", subtitle: "Asset library and routing" },
@@ -2453,6 +2455,10 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
     );
   }
 
+  if (view === "chat") {
+    return renderShell(<ChatCommandCenterPanel project={selectedProject} />);
+  }
+
   if (view === "ai-brain") {
     return renderShell(
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
@@ -2621,7 +2627,19 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
       </section>,
     );
   }
-  return (
+
+  return renderShell(
+    <section className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-6">
+      <h2 className="text-lg font-semibold text-zinc-50">View unavailable</h2>
+      <p className="mt-2 text-sm leading-6 text-zinc-400">The requested workspace view is not registered.</p>
+    </section>,
+  );
+
+  if (!pendingProjectAction || !pendingProject) {
+    return null;
+  }
+
+  return ((pendingProjectAction, pendingProject) => (
     <div className="min-h-screen bg-background text-zinc-100">
       <header className="border-b border-zinc-800 bg-zinc-950/90">
         <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-4 px-4 py-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
@@ -2779,7 +2797,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
           <div className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-4">
             <div className="flex items-center justify-between gap-3">
               <span className="text-sm text-zinc-400">Handoffs</span>
-              <Layers3 className="h-4 w-4 text-violet-300" aria-hidden="true" />
+              <Workflow className="h-4 w-4 text-violet-300" aria-hidden="true" />
             </div>
             <p className="mt-3 text-3xl font-semibold text-zinc-50">{handoffCount}</p>
           </div>
@@ -3004,7 +3022,7 @@ export function ControlCenter({ view = "dashboard" }: { view?: AppView }) {
         </section>
       </main>
     </div>
-  );
+  ))(pendingProjectAction!, pendingProject!);
 }
 
 

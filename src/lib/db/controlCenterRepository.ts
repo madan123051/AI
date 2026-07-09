@@ -2642,6 +2642,102 @@ export async function requestReplyApprovalForMessageInDb(message: Message) {
   return { message: updatedMessage, task, state, approval, log };
 }
 
+export async function requestChatSafetyApprovalInDb(input: {
+  projectId: string;
+  prompt: string;
+  title: string;
+  reason: string;
+  actionType: ApprovalActionType;
+  connector: Approval["connector"];
+  targetType: string;
+  targetId?: string;
+  draftText?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  assertSupabaseReady();
+  const supabase = getSupabaseClient();
+  const now = new Date().toISOString();
+  const targetId = input.targetId?.trim() || `chat-command-${Date.now()}`;
+  const reviewTask = await createApprovalReviewTask({
+    supabase,
+    projectId: input.projectId,
+    title: compactText(input.title, 90),
+    goal: [
+      "Review this AI Chat Command Center request before any external action happens.",
+      `Requested action: ${input.actionType}`,
+      `Connector: ${input.connector}`,
+      `Target: ${input.targetType} (${targetId})`,
+      `Reason: ${input.reason}`,
+      "Original chat command:",
+      input.prompt,
+      input.draftText ? "Draft/action text:" : "",
+      input.draftText ?? "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    priority: "medium",
+    currentStage: "Chat command captured, waiting for approval",
+    completedSteps: ["chat command parsed", "risk gate applied", "approval request created"],
+    nextStep: "Review the approval before any connector execution is attempted.",
+    lastAi: "AI Chat",
+    metadata: {
+      source: "chat_command_center",
+      requested_action_type: input.actionType,
+      connector: input.connector,
+      target_type: input.targetType,
+      target_id: targetId,
+      original_prompt: input.prompt,
+      ...input.metadata,
+    },
+    createdAt: now,
+  });
+  const approvalPayload = {
+    task_id: reviewTask.task.id,
+    title: input.title,
+    requested_action: `chat_command:${input.actionType}:${targetId}`,
+    reason: input.reason,
+    status: "pending" as const,
+    action_type: input.actionType,
+    connector: input.connector,
+    target_id: targetId,
+    target_type: input.targetType,
+    draft_text: input.draftText ?? input.prompt,
+    metadata: {
+      source: "chat_command_center",
+      original_prompt: input.prompt,
+      safety_gate: "approval_required",
+      ...input.metadata,
+    },
+    execution_status: "pending_review" as const,
+    created_at: now,
+  };
+  const approval = (await insertApproval(supabase, approvalPayload)) ?? localApproval(approvalPayload);
+  const log =
+    (await insertActionLog(supabase, {
+      project_id: input.projectId,
+      task_id: reviewTask.task.id,
+      actor: "AI Chat",
+      action: "approval.requested",
+      details: `Queued chat approval for ${input.actionType} via ${input.connector}.`,
+      created_at: now,
+    })) ??
+    localLog({
+      project_id: input.projectId,
+      task_id: reviewTask.task.id,
+      actor: "AI Chat",
+      action: "approval.requested",
+      details: `Queued chat approval for ${input.actionType} via ${input.connector}.`,
+      created_at: now,
+    });
+
+  return {
+    task: reviewTask.task,
+    state: reviewTask.state,
+    approval,
+    log,
+  };
+}
+
 export async function createContentItemInDb(input: {
   projectId: string;
   title: string;

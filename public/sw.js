@@ -1,4 +1,4 @@
-const CACHE_NAME = "wildsaura-ai-static-v1";
+const CACHE_NAME = "wildsaura-ai-static-v2";
 
 self.addEventListener("install", () => {
   self.skipWaiting();
@@ -26,7 +26,11 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (!["style", "script", "font", "image", "manifest"].includes(request.destination)) {
+  if (url.pathname.startsWith("/_next/")) {
+    return;
+  }
+
+  if (!["font", "image", "manifest"].includes(request.destination)) {
     return;
   }
 

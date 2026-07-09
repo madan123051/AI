@@ -3,6 +3,7 @@ export const privateAppRoutes = [
   "/projects",
   "/tasks",
   "/inbox",
+  "/chat",
   "/publisher",
   "/media",
   "/connectors",
@@ -19,9 +20,9 @@ export const privateAppRoutes = [
 export const privateApiRoutes = [
   "/api/ai",
   "/api/approvals",
+  "/api/chat",
   "/api/connectors/email/test",
   "/api/handoff",
-  "/api/media",
   "/api/tasks",
 ];
 

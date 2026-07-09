@@ -584,6 +584,56 @@ alter table public.messages add constraint messages_status_check check (status i
 alter table public.messages add constraint messages_source_check check (source in ('gmail', 'website', 'instagram', 'facebook', 'viber'));
 alter table public.messages add constraint messages_priority_check check (priority in ('low', 'medium', 'high'));
 
+create table if not exists public.chat_threads (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid references public.projects(id) on delete cascade,
+  title text not null default 'New chat',
+  model_id text not null default 'gpt',
+  status text not null default 'active',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.chat_threads add column if not exists project_id uuid references public.projects(id) on delete cascade;
+alter table public.chat_threads add column if not exists title text not null default 'New chat';
+alter table public.chat_threads add column if not exists model_id text not null default 'gpt';
+alter table public.chat_threads add column if not exists status text not null default 'active';
+alter table public.chat_threads add column if not exists created_at timestamptz not null default now();
+alter table public.chat_threads add column if not exists updated_at timestamptz not null default now();
+alter table public.chat_threads drop column if exists owner_id;
+alter table public.chat_threads drop constraint if exists chat_threads_model_id_check;
+alter table public.chat_threads drop constraint if exists chat_threads_status_check;
+alter table public.chat_threads add constraint chat_threads_model_id_check check (model_id in ('gpt', 'gemini', 'claude', 'codex', 'deepseek', 'local'));
+alter table public.chat_threads add constraint chat_threads_status_check check (status in ('active', 'archived'));
+
+create table if not exists public.chat_messages (
+  id uuid primary key default gen_random_uuid(),
+  thread_id uuid not null references public.chat_threads(id) on delete cascade,
+  role text not null default 'assistant',
+  content text not null default '',
+  model_id text,
+  tool_name text,
+  tool_call jsonb,
+  tool_result jsonb,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+alter table public.chat_messages add column if not exists thread_id uuid references public.chat_threads(id) on delete cascade;
+alter table public.chat_messages add column if not exists role text not null default 'assistant';
+alter table public.chat_messages add column if not exists content text not null default '';
+alter table public.chat_messages add column if not exists model_id text;
+alter table public.chat_messages add column if not exists tool_name text;
+alter table public.chat_messages add column if not exists tool_call jsonb;
+alter table public.chat_messages add column if not exists tool_result jsonb;
+alter table public.chat_messages add column if not exists metadata jsonb not null default '{}'::jsonb;
+alter table public.chat_messages add column if not exists created_at timestamptz not null default now();
+alter table public.chat_messages drop column if exists owner_id;
+alter table public.chat_messages drop constraint if exists chat_messages_role_check;
+alter table public.chat_messages drop constraint if exists chat_messages_model_id_check;
+alter table public.chat_messages add constraint chat_messages_role_check check (role in ('user', 'assistant', 'tool', 'system'));
+alter table public.chat_messages add constraint chat_messages_model_id_check check (model_id is null or model_id in ('gpt', 'gemini', 'claude', 'codex', 'deepseek', 'local'));
+
 create index if not exists tasks_project_id_idx on public.tasks(project_id);
 create index if not exists task_states_task_id_idx on public.task_states(task_id);
 create index if not exists action_logs_task_id_idx on public.action_logs(task_id);
@@ -616,6 +666,8 @@ create index if not exists media_assets_asset_type_idx on public.media_assets(as
 create index if not exists messages_project_id_idx on public.messages(project_id);
 create index if not exists messages_project_status_received_idx on public.messages(project_id, status, received_at desc);
 create index if not exists messages_linked_task_id_idx on public.messages(linked_task_id);
+create index if not exists chat_threads_project_id_updated_idx on public.chat_threads(project_id, updated_at desc);
+create index if not exists chat_messages_thread_id_created_idx on public.chat_messages(thread_id, created_at);
 
 grant usage on schema public to anon, authenticated;
 grant select, insert, update, delete on all tables in schema public to anon, authenticated;
@@ -640,6 +692,8 @@ alter table public.content_schedule enable row level security;
 alter table public.publish_logs enable row level security;
 alter table public.media_assets enable row level security;
 alter table public.messages enable row level security;
+alter table public.chat_threads enable row level security;
+alter table public.chat_messages enable row level security;
 
 drop policy if exists "allow anon read projects" on public.projects;
 drop policy if exists "allow anon insert projects" on public.projects;
@@ -713,6 +767,14 @@ drop policy if exists "allow anon read messages" on public.messages;
 drop policy if exists "allow anon insert messages" on public.messages;
 drop policy if exists "allow anon update messages" on public.messages;
 drop policy if exists "allow anon delete messages" on public.messages;
+drop policy if exists "allow anon read chat_threads" on public.chat_threads;
+drop policy if exists "allow anon insert chat_threads" on public.chat_threads;
+drop policy if exists "allow anon update chat_threads" on public.chat_threads;
+drop policy if exists "allow anon delete chat_threads" on public.chat_threads;
+drop policy if exists "allow anon read chat_messages" on public.chat_messages;
+drop policy if exists "allow anon insert chat_messages" on public.chat_messages;
+drop policy if exists "allow anon update chat_messages" on public.chat_messages;
+drop policy if exists "allow anon delete chat_messages" on public.chat_messages;
 
 create policy "allow anon read projects" on public.projects for select to anon, authenticated using (true);
 create policy "allow anon insert projects" on public.projects for insert to anon, authenticated with check (true);
@@ -786,4 +848,12 @@ create policy "allow anon read messages" on public.messages for select to anon, 
 create policy "allow anon insert messages" on public.messages for insert to anon, authenticated with check (true);
 create policy "allow anon update messages" on public.messages for update to anon, authenticated using (true) with check (true);
 create policy "allow anon delete messages" on public.messages for delete to anon, authenticated using (true);
+create policy "allow anon read chat_threads" on public.chat_threads for select to anon, authenticated using (true);
+create policy "allow anon insert chat_threads" on public.chat_threads for insert to anon, authenticated with check (true);
+create policy "allow anon update chat_threads" on public.chat_threads for update to anon, authenticated using (true) with check (true);
+create policy "allow anon delete chat_threads" on public.chat_threads for delete to anon, authenticated using (true);
+create policy "allow anon read chat_messages" on public.chat_messages for select to anon, authenticated using (true);
+create policy "allow anon insert chat_messages" on public.chat_messages for insert to anon, authenticated with check (true);
+create policy "allow anon update chat_messages" on public.chat_messages for update to anon, authenticated using (true) with check (true);
+create policy "allow anon delete chat_messages" on public.chat_messages for delete to anon, authenticated using (true);
 
